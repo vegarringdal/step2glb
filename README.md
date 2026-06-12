@@ -140,6 +140,8 @@ Produces the same GLB layout as
 viewer code (e.g. three.js `BatchedMesh` selection + a treeview) works for
 both RVM and STEP input:
 
+> PS! if there is a lot of instancing this will make size get bigger
+
 - **One node + one mesh + one material per distinct color.** All instances
   are expanded and baked to world space (meters, Y-up via the same
   `(x, y, z) → (x, z, −y)` rotation rvm_parser_glb applies — `--up-axis y`
