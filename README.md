@@ -362,6 +362,9 @@ cargo test
   - `thin_arc_band.step` — a thin planar crescent between two near-concentric
     arcs: at a coarse deflection the discretized arcs self-intersect and tess2
     fails, so the face is re-tessellated finer and recovered.
+  - `inscribed_hole.step` — a planar face whose square hole is inscribed in its
+    circular rim (corners on the rim): the corners poke through the rim's
+    chords, so the hole is nudged inward to let tess2 recover the face.
   - `colored.step` — a `STYLED_ITEM` chain: color map -> mesh bucket -> GLB
     material assertions.
   - merged mode: draw ranges tile every color mesh's index buffer exactly and

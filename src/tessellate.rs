@@ -733,6 +733,56 @@ fn ok_or(success: bool, reason: &'static str) -> Result<(), &'static str> {
     }
 }
 
+/// Signed area (shoelace) of a closed UV polygon.
+fn poly_area(c: &[[f64; 2]]) -> f64 {
+    let mut a = 0.0;
+    for i in 0..c.len() {
+        let p = c[i];
+        let q = c[(i + 1) % c.len()];
+        a += p[0] * q[1] - q[0] * p[1];
+    }
+    a * 0.5
+}
+
+/// Retry tess2 with the interior holes nudged inward toward their centroids. A
+/// hole whose vertices lie exactly on a curved outer boundary (a polygon
+/// inscribed in a circular rim, say) pokes through the boundary's discretized
+/// chords, so the odd-winding contour self-intersects and tess2 bails. Shrinking
+/// the holes a hair separates them from the rim; the recovered face is within a
+/// fraction of the deflection of the true one — far better than dropping it.
+fn tess2_with_shrunk_holes(loops_uv: &[Vec<[f64; 2]>], su: f64, sv: f64) -> Option<Tess2Out> {
+    if loops_uv.len() < 2 {
+        return None;
+    }
+    // the largest-area loop is the outer boundary; shrink every other loop
+    let outer = (0..loops_uv.len()).max_by(|&a, &b| {
+        poly_area(&loops_uv[a])
+            .abs()
+            .total_cmp(&poly_area(&loops_uv[b]).abs())
+    })?;
+    for &frac in &[0.01_f64, 0.04, 0.1] {
+        let shrunk: Vec<Vec<[f64; 2]>> = loops_uv
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                if i == outer || c.is_empty() {
+                    return c.clone();
+                }
+                let n = c.len() as f64;
+                let cx = c.iter().map(|p| p[0]).sum::<f64>() / n;
+                let cy = c.iter().map(|p| p[1]).sum::<f64>() / n;
+                c.iter()
+                    .map(|p| [p[0] + (cx - p[0]) * frac, p[1] + (cy - p[1]) * frac])
+                    .collect()
+            })
+            .collect();
+        if let Some(r) = run_tess2(&shrunk, su, sv) {
+            return Some(r);
+        }
+    }
+    None
+}
+
 /// Triangulate closed UV contours (odd winding -> holes), refine for
 /// curvature + chord deviation, map to 3D and append to `mesh`.
 fn emit_uv_region(
@@ -774,7 +824,9 @@ fn emit_uv_region(
         ((lu / size).max(1e-9 / du), (lv / size).max(1e-9 / dv))
     };
 
-    let (verts_uv, mut tris) = match run_tess2(loops_uv, su, sv) {
+    let (verts_uv, mut tris) = match run_tess2(loops_uv, su, sv)
+        .or_else(|| tess2_with_shrunk_holes(loops_uv, su, sv))
+    {
         Some(r) => r,
         None => return false,
     };
@@ -863,11 +915,10 @@ pub fn install_panic_guard() {
     }));
 }
 
-fn run_tess2(
-    loops_uv: &[Vec<[f64; 2]>],
-    su: f64,
-    sv: f64,
-) -> Option<(Vec<[f64; 2]>, Vec<[u32; 3]>)> {
+/// tess2 output in UV space: (vertices, triangle index triples).
+type Tess2Out = (Vec<[f64; 2]>, Vec<[u32; 3]>);
+
+fn run_tess2(loops_uv: &[Vec<[f64; 2]>], su: f64, sv: f64) -> Option<Tess2Out> {
     TESS_GUARD.with(|g| g.set(true));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut tess = Tessellator::new();

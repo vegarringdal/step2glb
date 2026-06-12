@@ -109,6 +109,26 @@ fn edge_with_null_curve_falls_back_to_a_segment() {
     assert!((total_area(&mesh) - 48.0).abs() < 1e-6);
 }
 
+// ---------------------------- hole inscribed in a curved rim -> shrink retry
+
+#[test]
+fn inscribed_hole_recovers_by_shrinking() {
+    // The square hole's corners lie exactly on the circular rim, so once the
+    // rim is discretized they poke through it; the face must still tessellate
+    // (holes nudged inward) instead of being skipped.
+    let sf = load("inscribed_hole.step");
+    let (set, stats) = tessellate_all(&sf, &["MANIFOLD_SOLID_BREP"]);
+    let mesh = set.merged();
+    assert_eq!(stats.faces_ok, 1, "inscribed-hole face must recover");
+    assert_eq!(stats.faces_failed, 0);
+    // pi*100 - 200 ~= 114.16, a touch more after the hole is nudged inward
+    let a = total_area(&mesh);
+    assert!((110.0..120.0).contains(&a), "area {}", a);
+    for p in mesh.positions.chunks(3) {
+        assert!(p[2].abs() < 1e-6, "off-plane point {:?}", p);
+    }
+}
+
 // ------------------------------ thin curved face -> finer-retry on tess2 fail
 
 #[test]
