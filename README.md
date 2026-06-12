@@ -144,8 +144,6 @@ Produces the same GLB layout as
 viewer code (e.g. three.js `BatchedMesh` selection + a treeview) works for
 both RVM and STEP input:
 
-> PS! if there is a lot of instancing this will make size get bigger
-
 - **One node + one mesh + one material per distinct color.** All instances
   are expanded and baked to world space (meters, Y-up via the same
   `(x, y, z) → (x, z, −y)` rotation rvm_parser_glb applies — `--up-axis y`
@@ -358,6 +356,12 @@ cargo test
   - `null_curve_edge.step` — a face whose boundary has an edge with a null
     (`$`) 3D curve: the edge becomes a straight segment instead of dropping
     the whole face (regression for a real exporter quirk).
+  - `bspline_unbounded.step` — a B-spline patch whose only bound is degenerate
+    (a seam slit / `VERTEX_LOOP`): tessellated over its full knot domain
+    instead of being skipped; exact planar area.
+  - `thin_arc_band.step` — a thin planar crescent between two near-concentric
+    arcs: at a coarse deflection the discretized arcs self-intersect and tess2
+    fails, so the face is re-tessellated finer and recovered.
   - `colored.step` — a `STYLED_ITEM` chain: color map -> mesh bucket -> GLB
     material assertions.
   - merged mode: draw ranges tile every color mesh's index buffer exactly and

@@ -109,6 +109,54 @@ fn edge_with_null_curve_falls_back_to_a_segment() {
     assert!((total_area(&mesh) - 48.0).abs() < 1e-6);
 }
 
+// ------------------------------ thin curved face -> finer-retry on tess2 fail
+
+#[test]
+fn thin_arc_band_recovers_via_finer_retry() {
+    // At a coarse deflection the two near-concentric boundary arcs (r40, r40.3)
+    // self-intersect once discretized; the face must still tessellate via the
+    // finer-retry fallback instead of being skipped.
+    let sf = load("thin_arc_band.step");
+    let coarse = TessParams {
+        deflection: 1.0,
+        max_angle: 25.0_f64.to_radians(),
+    };
+    let colors = styles::build_color_map(&sf);
+    let (set, stats) = tessellate_with(&sf, &coarse, &colors, &["MANIFOLD_SOLID_BREP"]);
+    let mesh = set.merged();
+    assert_eq!(stats.faces_ok, 1, "thin band must recover via finer retry");
+    assert_eq!(stats.faces_failed, 0);
+    // annular sector area ~ (pi/3)*(40.3^2 - 40^2)/2 ~= 12.6
+    assert!(
+        (total_area(&mesh) - 12.6).abs() < 0.6,
+        "area {}",
+        total_area(&mesh)
+    );
+    for p in mesh.positions.chunks(3) {
+        assert!(p[2].abs() < 1e-6, "off-plane point {:?}", p);
+    }
+}
+
+// ----------------------------------- B-spline patch with no real boundary
+
+#[test]
+fn bspline_patch_with_degenerate_bound_tessellates_full_domain() {
+    // A B-spline face whose only bound is degenerate (a VERTEX_LOOP / seam
+    // slit) must tessellate over its whole knot domain, not be skipped: the
+    // knot domain is the patch extent, so this reproduces just the patch.
+    let sf = load("bspline_unbounded.step");
+    let (set, stats) = tessellate_all(&sf, &["MANIFOLD_SOLID_BREP"]);
+    let mesh = set.merged();
+    assert_eq!(stats.faces_ok, 1, "patch must tessellate, not be skipped");
+    assert_eq!(stats.faces_failed, 0);
+    // flat 10x10 patch -> area 100, independent of tessellation density
+    assert!((total_area(&mesh) - 100.0).abs() < 1e-4, "area {}", total_area(&mesh));
+    // planar patch in z=0: every point on the plane
+    for p in mesh.positions.chunks(3) {
+        assert!(p[2].abs() < 1e-6, "off-plane point {:?}", p);
+    }
+}
+
 // -------------------------------------------- periodic full cylinder band
 
 #[test]

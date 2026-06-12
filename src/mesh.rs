@@ -30,6 +30,19 @@ impl TriMesh {
             .extend_from_slice(&[n.x as f32, n.y as f32, n.z as f32]);
     }
 
+    /// Snapshot the buffer lengths so a partial, failed face emission can be
+    /// rolled back and retried (e.g. at a finer tessellation) without leaving
+    /// stray vertices behind.
+    pub fn checkpoint(&self) -> (usize, usize, usize) {
+        (self.positions.len(), self.normals.len(), self.indices.len())
+    }
+
+    pub fn rollback(&mut self, cp: (usize, usize, usize)) {
+        self.positions.truncate(cp.0);
+        self.normals.truncate(cp.1);
+        self.indices.truncate(cp.2);
+    }
+
     pub fn append(&mut self, o: &TriMesh) {
         let base = self.vertex_count() as u32;
         self.positions.extend_from_slice(&o.positions);

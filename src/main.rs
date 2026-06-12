@@ -493,7 +493,13 @@ fn report_unsupported(stats: &TessStats) {
                 .collect::<Vec<_>>()
                 .join(" ");
             eprintln!("  {:>6}  {}  (e.g. {})", n, ty, ids);
+            // the stage that failed for the first face of this type, so the
+            // reason is visible in the console without --debug-print
+            if let Some((_, reason)) = stats.debug_samples.get(ty) {
+                eprintln!("          why: {}", reason);
+            }
         }
+        eprintln!("  (run with --debug-print to dump these faces as a shareable .step)");
     }
 }
 
@@ -527,19 +533,41 @@ fn maybe_write_debug(args: &Args, sf: &StepFile, stats: &TessStats) {
     } else {
         out.push_str("HEADER;\nENDSEC;\n");
     }
+    // Pre-compute each sample's reference closure so we can order the excerpts
+    // smallest-first: a single huge B-spline (thousands of control points) must
+    // not bury the simple PLANE/CYLINDER cases past a copy-paste/scroll limit.
+    let mut samples: Vec<(&String, u32, &'static str, Vec<u32>)> = stats
+        .debug_samples
+        .iter()
+        .map(|(ty, (face, reason))| (ty, *face, *reason, sf.subgraph(*face, 4000)))
+        .collect();
+    samples.sort_by(|a, b| a.3.len().cmp(&b.3.len()).then(a.0.cmp(b.0)));
+
+    // Compact, geometry-free summary first: type, sample face, entity count and
+    // the failing stage — one line each, so it stays readable (and pasteable)
+    // no matter how large the per-face excerpts below get.
+    out.push_str("/* ===== FAILURE SUMMARY =====\n");
+    for (ty, face, reason, ids) in &samples {
+        out.push_str(&format!(
+            "   {:<28} face #{:<10} ({:>4} entities)  {}\n",
+            ty,
+            face,
+            ids.len(),
+            reason
+        ));
+    }
+    out.push_str("   ===== END SUMMARY ===== */\n");
     out.push_str("DATA;\n");
 
     // dedup entities shared between faces so the single DATA section stays valid
     let mut emitted = std::collections::HashSet::new();
     let mut max_id = 0u32;
-    let mut samples: Vec<(&String, &(u32, &'static str))> = stats.debug_samples.iter().collect();
-    samples.sort_by(|a, b| a.0.cmp(b.0));
-    for (ty, (face, reason)) in &samples {
+    for (ty, face, reason, ids) in &samples {
         out.push_str(&format!(
             "/* ===== {} (face #{}) -- failure stage: {} ===== */\n",
             ty, face, reason
         ));
-        for id in sf.subgraph(*face, 4000) {
+        for &id in ids {
             max_id = max_id.max(id);
             if !emitted.insert(id) {
                 continue;
@@ -557,7 +585,7 @@ fn maybe_write_debug(args: &Args, sf: &StepFile, stats: &TessStats) {
     let solid = max_id + 2;
     let faces = samples
         .iter()
-        .map(|(_, (f, _))| format!("#{}", f))
+        .map(|(_, f, _, _)| format!("#{}", f))
         .collect::<Vec<_>>()
         .join(",");
     out.push_str("/* synthetic root so the excerpt is self-contained */\n");

@@ -316,31 +316,7 @@ fn tessellate_face(
 
     let surf = model::surface(sf, surf_id);
 
-    let mut loops3d: Vec<Loop3> = Vec::new();
-    for b in &bounds {
-        let bid = match b.as_ref_id() {
-            Some(b) => b,
-            None => continue,
-        };
-        // FACE_BOUND / FACE_OUTER_BOUND ('', loop, orientation)
-        let bp = match sf.params(bid) {
-            Some(bp) => bp,
-            None => continue,
-        };
-        let loop_id = match bp.get(1).and_then(|v| v.as_ref_id()) {
-            Some(l) => l,
-            None => continue,
-        };
-        let orientation = bp.get(2).and_then(|v| v.as_bool()).unwrap_or(true);
-        if let Some(mut lp) = loop_polyline(sf, loop_id, tp) {
-            if lp.len() >= 3 {
-                if !orientation {
-                    lp.reverse();
-                }
-                loops3d.push(Loop3 { pts: lp });
-            }
-        }
-    }
+    let loops3d = build_loops3d(sf, &bounds, tp);
     if loops3d.is_empty() {
         // full closed quadric with no bounds: tessellate the whole domain
         if let Some(s) = &surf {
@@ -379,13 +355,69 @@ fn tessellate_face(
         }
     };
 
+    let cp = mesh.checkpoint();
     match face_to_mesh(&surf, &loops3d, tp, same_sense, mesh) {
         Ok(()) => stats.faces_ok += 1,
         Err(reason) => {
+            // A "tess2 produced no triangles" failure on a thin curved face is
+            // typically a self-intersecting boundary: arcs discretized at the
+            // global deflection sag deeper than the face is thin, so adjacent
+            // (near-concentric) boundary chords cross. Re-discretize the
+            // boundary much finer and retry before giving up.
+            if reason.contains("tess2") {
+                mesh.rollback(cp);
+                for div in [8.0_f64, 64.0] {
+                    let fine = TessParams {
+                        deflection: (tp.deflection / div).max(1e-4),
+                        max_angle: (tp.max_angle / div.sqrt()).max(0.02),
+                    };
+                    let fl = build_loops3d(sf, &bounds, &fine);
+                    if fl.len() != loops3d.len() {
+                        continue;
+                    }
+                    let cp2 = mesh.checkpoint();
+                    if face_to_mesh(&surf, &fl, &fine, same_sense, mesh).is_ok() {
+                        stats.faces_ok += 1;
+                        return;
+                    }
+                    mesh.rollback(cp2);
+                }
+            }
             stats.faces_failed += 1;
             record_failed(stats, sf, surf_id, face, reason);
         }
     }
+}
+
+/// Discretize every FACE_BOUND of a face into 3D boundary polylines at the
+/// given tessellation tolerance (orientation already applied).
+fn build_loops3d(sf: &StepFile, bounds: &[crate::step::P], tp: &TessParams) -> Vec<Loop3> {
+    let mut loops3d: Vec<Loop3> = Vec::new();
+    for b in bounds {
+        let bid = match b.as_ref_id() {
+            Some(b) => b,
+            None => continue,
+        };
+        // FACE_BOUND / FACE_OUTER_BOUND ('', loop, orientation)
+        let bp = match sf.params(bid) {
+            Some(bp) => bp,
+            None => continue,
+        };
+        let loop_id = match bp.get(1).and_then(|v| v.as_ref_id()) {
+            Some(l) => l,
+            None => continue,
+        };
+        let orientation = bp.get(2).and_then(|v| v.as_bool()).unwrap_or(true);
+        if let Some(mut lp) = loop_polyline(sf, loop_id, tp) {
+            if lp.len() >= 3 {
+                if !orientation {
+                    lp.reverse();
+                }
+                loops3d.push(Loop3 { pts: lp });
+            }
+        }
+    }
+    loops3d
 }
 
 /// Track a failed face: per-surface-type count plus a few sample face ids so
@@ -1045,7 +1077,11 @@ fn tessellate_periodic_band(
     any
 }
 
-/// Full-domain tessellation for an unbounded closed quadric face.
+/// Full-domain tessellation for a face that has no real trimming boundary —
+/// a closed quadric (sphere/torus) or a (rational) B-spline patch whose only
+/// boundary is a seam slit or a degenerate loop. For a B-spline the knot
+/// domain *is* the patch extent, so gridding it reproduces exactly this face
+/// (not an infinite surface), which is why this is safe to fall into.
 fn tessellate_unbounded(
     surf: &Surface,
     tp: &TessParams,
@@ -1056,6 +1092,10 @@ fn tessellate_unbounded(
     let (u0, u1, v0, v1) = match surf {
         Surface::Sphere(_, _) => (0.0, TAU, -PI / 2.0, PI / 2.0),
         Surface::Torus(_, _, _) => (0.0, TAU, 0.0, TAU),
+        Surface::BSpline(b) => {
+            let ((u0, u1), (v0, v1)) = b.domain();
+            (u0, u1, v0, v1)
+        }
         _ => return false,
     };
     let du = surf.u_step(tp.deflection, tp.max_angle);
