@@ -88,6 +88,12 @@ struct Args {
     #[arg(long)]
     no_optimize: bool,
 
+    /// Write a self-contained STEP sub-graph of the first failing face of each
+    /// surface type (plus the file HEADER and the stage that failed) to
+    /// <input>.debug.txt, for diagnosing skipped faces without the whole file
+    #[arg(long)]
+    debug_print: bool,
+
     /// Don't rescale to meters (keep raw file units in the GLB)
     #[arg(long)]
     no_unit_scale: bool,
@@ -221,6 +227,7 @@ fn main() {
             t1.elapsed()
         );
         report_unsupported(&stats);
+        maybe_write_debug(&args, &sf, &stats);
         eprintln!(
             "{} verts, {} tris",
             merged.total_vertices(),
@@ -392,6 +399,7 @@ fn main() {
         t1.elapsed()
     );
     report_unsupported(&stats);
+    maybe_write_debug(&args, &sf, &stats);
 
     let total_tris: usize = builder.total_triangles();
     let total_verts: usize = builder.total_vertices();
@@ -486,6 +494,85 @@ fn report_unsupported(stats: &TessStats) {
                 .join(" ");
             eprintln!("  {:>6}  {}  (e.g. {})", n, ty, ids);
         }
+    }
+}
+
+/// `--debug-print`: write a self-contained STEP excerpt for the first failing
+/// face of each surface type so a vendor model's failures can be diagnosed (and
+/// turned into a fixture) without shipping the whole file. Each excerpt is the
+/// face entity plus the transitive closure of everything it references.
+fn maybe_write_debug(args: &Args, sf: &StepFile, stats: &TessStats) {
+    if !args.debug_print {
+        return;
+    }
+    if stats.debug_samples.is_empty() {
+        eprintln!("--debug-print: no failing supported faces to dump");
+        return;
+    }
+    // Emit one self-contained, re-runnable Part-21 file: rename it to .step and
+    // feed it back through step2glb to reproduce the failures in isolation.
+    let mut out = String::from("ISO-10303-21;\n");
+    out.push_str(
+        "/* step2glb --debug-print: the first failing face of each surface type,\n\
+        \x20  each as the ADVANCED_FACE plus the transitive closure of everything\n\
+        \x20  it references. Geometry only. Rename to .step to reproduce. */\n",
+    );
+    // original file HEADER (schema + originating system) — small, valuable
+    let (h0, h1) = sf.header_range;
+    if h1 > h0 && h1 <= sf.data.len() {
+        out.push_str(&String::from_utf8_lossy(&sf.data[h0..h1]));
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    } else {
+        out.push_str("HEADER;\nENDSEC;\n");
+    }
+    out.push_str("DATA;\n");
+
+    // dedup entities shared between faces so the single DATA section stays valid
+    let mut emitted = std::collections::HashSet::new();
+    let mut max_id = 0u32;
+    let mut samples: Vec<(&String, &(u32, &'static str))> = stats.debug_samples.iter().collect();
+    samples.sort_by(|a, b| a.0.cmp(b.0));
+    for (ty, (face, reason)) in &samples {
+        out.push_str(&format!(
+            "/* ===== {} (face #{}) -- failure stage: {} ===== */\n",
+            ty, face, reason
+        ));
+        for id in sf.subgraph(*face, 4000) {
+            max_id = max_id.max(id);
+            if !emitted.insert(id) {
+                continue;
+            }
+            if let Some(line) = sf.entity_source(id) {
+                out.push_str(&line);
+                out.push('\n');
+            }
+        }
+    }
+    // Synthesize a shell + solid around the sample faces so the excerpt has a
+    // traversable root (the original shell/product chain isn't included) and
+    // runs straight back through the converter to reproduce the skips.
+    let shell = max_id + 1;
+    let solid = max_id + 2;
+    let faces = samples
+        .iter()
+        .map(|(_, (f, _))| format!("#{}", f))
+        .collect::<Vec<_>>()
+        .join(",");
+    out.push_str("/* synthetic root so the excerpt is self-contained */\n");
+    out.push_str(&format!("#{}=CLOSED_SHELL('debug',({}));\n", shell, faces));
+    out.push_str(&format!("#{}=MANIFOLD_SOLID_BREP('debug',#{});\n", solid, shell));
+    out.push_str("ENDSEC;\nEND-ISO-10303-21;\n");
+
+    let path = args.input.with_extension("debug.txt");
+    match std::fs::write(&path, out) {
+        Ok(()) => eprintln!(
+            "--debug-print: wrote {} face excerpt(s) to {}",
+            stats.debug_samples.len(),
+            path.display()
+        ),
+        Err(e) => eprintln!("--debug-print: cannot write {}: {}", path.display(), e),
     }
 }
 

@@ -118,6 +118,10 @@ step2glb model.step --no-optimize
 # tessellation threads (default: auto = CPU cores, capped at 4);
 # output is byte-identical regardless of thread count
 step2glb model.step -t 8
+
+# diagnose skipped faces: dump a minimal, shareable STEP reproduction of the
+# first failing face of each surface type to model.debug.txt
+step2glb model.step --debug-print
 ```
 
 `--tree` output looks like:
@@ -237,6 +241,31 @@ faces skipped on supported surfaces (trimming/tessellation failed):
       12  TOROIDAL_SURFACE
 ```
 
+### Diagnosing skipped faces (`--debug-print`)
+
+When a *supported* surface still fails on some model, `--debug-print` writes a
+minimal, self-contained reproduction to `<input>.debug.txt`: the first failing
+face of each surface type, each emitted as its `ADVANCED_FACE` plus the
+transitive closure of every entity it references (loops, edges, curves,
+points, the surface), the file's `HEADER` (schema + originating system), a
+synthetic shell/solid root, and a comment naming the stage that failed:
+
+```sh
+step2glb vendor_part.step --debug-print   # -> vendor_part.debug.txt
+```
+
+```jsonc
+/* ===== CONICAL_SURFACE (face #271594) -- failure stage: periodic-band
+   (wrap-around) tessellation failed (multi-winding loop or seam ...) ===== */
+#...=CONICAL_SURFACE('',#...,...);
+...
+```
+
+It is geometry only — no part names, assembly structure or metadata leave the
+file — so it is safe to share from a confidential model, and it is valid
+Part-21: rename it to `.step` and feed it back in to reproduce the skip in
+isolation (or hand it over as a bug report / new test fixture).
+
 ## How it stays low-memory
 
 The file is held once as a byte buffer. A single string/comment-aware pass
@@ -286,8 +315,10 @@ let asm = step2glb::hierarchy::build(&sf);
 cargo test
 ```
 
-- **Unit tests** (in each module, 35): Part-21 lexing/param parsing edge
+- **Unit tests** (in each module, 36): Part-21 lexing/param parsing edge
   cases (escaped quotes, comments, complex instances, typed params),
+  entity-source reconstruction + reference-closure round-trip (the
+  `--debug-print` machinery),
   frame/matrix math, closed-form surface UV round-trips, Newton inversion
   round-trips on B-spline / extrusion / revolution surfaces (cold and
   hint-seeded), (rational) B-spline curve and surface evaluation against

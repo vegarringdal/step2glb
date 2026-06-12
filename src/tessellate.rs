@@ -39,6 +39,9 @@ pub struct TessStats {
     /// (Newton non-convergence, multi-winding loops, degenerate bounds, …):
     /// count plus a few sample ADVANCED_FACE entity ids for diagnosis
     pub failed_surfaces: HashMap<String, (usize, Vec<u32>)>,
+    /// first failing ADVANCED_FACE per surface type, plus the stage that
+    /// failed — used by `--debug-print` to dump a self-contained sub-graph
+    pub debug_samples: HashMap<String, (u32, &'static str)>,
 }
 
 impl TessStats {
@@ -60,6 +63,9 @@ impl TessStats {
                     e.1.push(*id);
                 }
             }
+        }
+        for (k, v) in &o.debug_samples {
+            self.debug_samples.entry(k.clone()).or_insert(*v);
         }
     }
 }
@@ -344,7 +350,14 @@ fn tessellate_face(
             }
         }
         stats.faces_failed += 1;
-        record_failed(stats, sf, surf_id, face);
+        record_failed(
+            stats,
+            sf,
+            surf_id,
+            face,
+            "no usable boundary loops (edge discretization failed or <3 points) \
+             and not a closed quadric",
+        );
         return;
     }
 
@@ -366,21 +379,31 @@ fn tessellate_face(
         }
     };
 
-    if face_to_mesh(&surf, &loops3d, tp, same_sense, mesh) {
-        stats.faces_ok += 1;
-    } else {
-        stats.faces_failed += 1;
-        record_failed(stats, sf, surf_id, face);
+    match face_to_mesh(&surf, &loops3d, tp, same_sense, mesh) {
+        Ok(()) => stats.faces_ok += 1,
+        Err(reason) => {
+            stats.faces_failed += 1;
+            record_failed(stats, sf, surf_id, face, reason);
+        }
     }
 }
 
 /// Track a failed face: per-surface-type count plus a few sample face ids so
-/// the offending entities can be looked up in the STEP file.
-fn record_failed(stats: &mut TessStats, sf: &StepFile, surf_id: u32, face: u32) {
-    let e = stats
-        .failed_surfaces
-        .entry(surface_type_name(sf, surf_id))
-        .or_insert((0, Vec::new()));
+/// the offending entities can be looked up in the STEP file. The first face of
+/// each type also records the failing stage for `--debug-print`.
+fn record_failed(
+    stats: &mut TessStats,
+    sf: &StepFile,
+    surf_id: u32,
+    face: u32,
+    reason: &'static str,
+) {
+    let ty = surface_type_name(sf, surf_id);
+    stats
+        .debug_samples
+        .entry(ty.clone())
+        .or_insert((face, reason));
+    let e = stats.failed_surfaces.entry(ty).or_insert((0, Vec::new()));
     e.0 += 1;
     if e.1.len() < 5 {
         e.1.push(face);
@@ -498,7 +521,7 @@ fn face_to_mesh(
     tp: &TessParams,
     same_sense: bool,
     mesh: &mut TriMesh,
-) -> bool {
+) -> Result<(), &'static str> {
     let per_u = surf.u_period();
     let per_v = surf.v_period();
 
@@ -648,15 +671,34 @@ fn face_to_mesh(
         area.abs() * 0.5 < 1e-9 * per * per
     };
     if loops_uv.iter().all(uv_slit) {
-        return tessellate_unbounded(surf, tp, same_sense, mesh);
+        return ok_or(
+            tessellate_unbounded(surf, tp, same_sense, mesh),
+            "slit/full-surface tessellation failed (surface not closed-form invertible)",
+        );
     }
 
     if loops_uv.iter().any(|l| l.w != 0) {
-        return tessellate_periodic_band(surf, &loops_uv, tp, same_sense, mesh);
+        return ok_or(
+            tessellate_periodic_band(surf, &loops_uv, tp, same_sense, mesh),
+            "periodic-band (wrap-around) tessellation failed \
+             (multi-winding loop or seam reconstruction)",
+        );
     }
 
     let contours: Vec<Vec<[f64; 2]>> = loops_uv.into_iter().map(|l| l.uv).collect();
-    emit_uv_region(surf, &contours, tp, same_sense, mesh)
+    ok_or(
+        emit_uv_region(surf, &contours, tp, same_sense, mesh),
+        "UV tessellation produced no triangles \
+         (tess2 failed: degenerate or self-intersecting UV contour)",
+    )
+}
+
+fn ok_or(success: bool, reason: &'static str) -> Result<(), &'static str> {
+    if success {
+        Ok(())
+    } else {
+        Err(reason)
+    }
 }
 
 /// Triangulate closed UV contours (odd winding -> holes), refine for
