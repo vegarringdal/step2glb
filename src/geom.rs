@@ -824,38 +824,118 @@ impl Surface {
     }
 }
 
-/// 2D Newton projection of p onto a B-spline surface, multi-start seeded.
+/// 2D Newton projection of p onto a B-spline surface. The `hint` (previous
+/// boundary point's solution) is tried first; cold starts seed at the Greville
+/// point of the control point nearest to p — on surfaces with many spans
+/// (coiled tubes, long sweeps) a coarse uniform grid aliases against the folds
+/// and Newton converges onto the wrong one — with the uniform domain grid kept
+/// as a fallback for rational nets whose control points sit far off-surface.
 fn newton_invert_bspline(b: &BSplineSurface, p: V3, hint: Option<(f64, f64)>) -> (f64, f64) {
-    let ((u0, u1), (v0, v1)) = b.domain();
-    let du_span = (u1 - u0).max(1e-12);
-    let dv_span = (v1 - v0).max(1e-12);
-
-    let dist2 = |u: f64, v: f64| {
+    let dist2 = |(u, v): (f64, f64)| {
         let d = b.point(u, v).sub(p);
         d.dot(d)
     };
+    let tol2 = (b.size * 1e-4) * (b.size * 1e-4);
 
-    let (mut u, mut v) = match hint {
-        Some(h) => h,
-        None => {
-            let nu = (b.nu.saturating_sub(b.deg_u)).clamp(2, 12) * 2;
-            let nv = (b.nv.saturating_sub(b.deg_v)).clamp(2, 12) * 2;
-            let mut best = (u0, v0);
-            let mut bd = f64::MAX;
-            for i in 0..=nu {
-                for j in 0..=nv {
-                    let uu = u0 + du_span * i as f64 / nu as f64;
-                    let vv = v0 + dv_span * j as f64 / nv as f64;
-                    let d = dist2(uu, vv);
-                    if d < bd {
-                        bd = d;
-                        best = (uu, vv);
-                    }
-                }
-            }
-            best
+    if let Some(h) = hint {
+        let r = newton_refine_bspline(b, p, h);
+        if dist2(r) <= tol2 {
+            return r;
         }
+        // wrong local minimum from a bad hint: fall through to a cold start
+    }
+
+    let ((u0, u1), (v0, v1)) = b.domain();
+    // Greville seed at the control point nearest to p, then at its control-net
+    // neighbours: near a tight crest the nearest one alone can descend into a
+    // non-zero local minimum on the wrong side, while a neighbour brackets the
+    // true foot of p. Early-out on the first on-surface result, so ordinary
+    // points cost a single Newton descent.
+    let mut bi = 0usize;
+    let mut bd = f64::MAX;
+    for (i, c) in b.cps.iter().enumerate() {
+        let d = c.sub(p);
+        let d = d.dot(d);
+        if d < bd {
+            bd = d;
+            bi = i;
+        }
+    }
+    let (ciu, civ) = ((bi / b.nv) as i64, (bi % b.nv) as i64);
+    let g = |knots: &[f64], deg: usize, i: usize| -> f64 {
+        knots[i + 1..=i + deg].iter().sum::<f64>() / deg as f64
     };
+    const OFFS: [(i64, i64); 13] = [
+        (0, 0),
+        (0, 1),
+        (0, -1),
+        (1, 0),
+        (-1, 0),
+        (0, 2),
+        (0, -2),
+        (1, 1),
+        (-1, -1),
+        (1, -1),
+        (-1, 1),
+        (2, 0),
+        (-2, 0),
+    ];
+    let mut r1 = (u0, v0);
+    let mut best1 = f64::MAX;
+    for (di, dj) in OFFS {
+        let iu = (ciu + di).clamp(0, b.nu as i64 - 1) as usize;
+        let iv = (civ + dj).clamp(0, b.nv as i64 - 1) as usize;
+        let seed = (
+            g(&b.knots_u, b.deg_u.max(1), iu).clamp(u0, u1),
+            g(&b.knots_v, b.deg_v.max(1), iv).clamp(v0, v1),
+        );
+        let r = newton_refine_bspline(b, p, seed);
+        let rd = dist2(r);
+        if rd < best1 {
+            best1 = rd;
+            r1 = r;
+        }
+        if best1 <= tol2 {
+            return r1;
+        }
+    }
+
+    // Last resort: a span-resolution domain scan. Control points of rational
+    // or sparsely-sampled nets can sit far off-surface (so every Greville
+    // seed descends wrong), but ~2 samples per knot span cannot alias against
+    // the surface's folds the way a coarse uniform grid does.
+    let du_span = (u1 - u0).max(1e-12);
+    let dv_span = (v1 - v0).max(1e-12);
+    let nu = (b.nu.saturating_sub(b.deg_u).max(1) * 2).clamp(4, 128);
+    let nv = (b.nv.saturating_sub(b.deg_v).max(1) * 2).clamp(4, 256);
+    let mut best = (u0, v0);
+    let mut bd = f64::MAX;
+    for i in 0..=nu {
+        for j in 0..=nv {
+            let uu = u0 + du_span * i as f64 / nu as f64;
+            let vv = v0 + dv_span * j as f64 / nv as f64;
+            let d = dist2((uu, vv));
+            if d < bd {
+                bd = d;
+                best = (uu, vv);
+            }
+        }
+    }
+    let r2 = newton_refine_bspline(b, p, best);
+    if dist2(r2) < best1 {
+        r2
+    } else {
+        r1
+    }
+}
+
+/// One damped Gauss-Newton descent of |S(u,v) - p|² from `seed`, clamped to
+/// the domain.
+fn newton_refine_bspline(b: &BSplineSurface, p: V3, seed: (f64, f64)) -> (f64, f64) {
+    let ((u0, u1), (v0, v1)) = b.domain();
+    let du_span = (u1 - u0).max(1e-12);
+    let dv_span = (v1 - v0).max(1e-12);
+    let (mut u, mut v) = seed;
 
     let hu = du_span * 1e-6;
     let hv = dv_span * 1e-6;
@@ -878,17 +958,26 @@ fn newton_invert_bspline(b: &BSplineSurface, p: V3, hint: Option<(f64, f64)>) ->
         let mut dv = (a11 * r2 - a12 * r1) / det;
         du = du.clamp(-du_span / 4.0, du_span / 4.0);
         dv = dv.clamp(-dv_span / 4.0, dv_span / 4.0);
-        u = (u + du).clamp(u0, u1);
-        v = (v + dv).clamp(v0, v1);
-        if du.abs() < 1e-12 * du_span && dv.abs() < 1e-12 * dv_span {
-            break;
+        // damped step: Gauss-Newton overshoots and ping-pongs around tight
+        // folds (the linearization ignores curvature) — halve until the
+        // residual actually drops
+        let d0 = f.dot(f);
+        let mut scale = 1.0;
+        let (mut nu_, mut nv_) = (u, v);
+        for _ in 0..8 {
+            nu_ = (u + du * scale).clamp(u0, u1);
+            nv_ = (v + dv * scale).clamp(v0, v1);
+            let d = b.point(nu_, nv_).sub(p);
+            if d.dot(d) < d0 {
+                break;
+            }
+            scale *= 0.5;
         }
-    }
-    // hint may have converged to a wrong local minimum: verify, else restart
-    if hint.is_some() {
-        let tol = b.size * 1e-4;
-        if dist2(u, v).sqrt() > tol {
-            return newton_invert_bspline(b, p, None);
+        let (su_, sv_) = (nu_ - u, nv_ - v);
+        u = nu_;
+        v = nv_;
+        if su_.abs() < 1e-12 * du_span && sv_.abs() < 1e-12 * dv_span {
+            break;
         }
     }
     (u, v)
@@ -1167,6 +1256,65 @@ mod tests {
             assert!(
                 close(p, s.point(u3, v3_), 1e-6),
                 "warm inversion at ({u},{v})"
+            );
+        }
+    }
+
+    #[test]
+    fn bspline_cold_inversion_lands_on_the_right_fold() {
+        // A ribbon folded back and forth ~19 times (like one face of a coiled
+        // spring laid flat, at a realistic ~21 control points per fold): a
+        // coarse uniform seeding grid aliases against the folds and Newton
+        // converges onto the wrong one. The cold start must recover the true
+        // (u, v) for points anywhere along the folds.
+        let nv = 400usize;
+        let mut cps = Vec::new();
+        for iu in 0..2 {
+            for k in 0..nv {
+                cps.push(v3(
+                    2.0 * k as f64,
+                    100.0 * (0.3 * k as f64).sin(),
+                    iu as f64 * 10.0,
+                ));
+            }
+        }
+        let deg_v = 3usize;
+        let mut knots_v = vec![0.0; deg_v + 1];
+        for k in 1..(nv - deg_v) {
+            knots_v.push(k as f64);
+        }
+        knots_v.extend(std::iter::repeat_n((nv - deg_v) as f64, deg_v + 1));
+        let b = BSplineSurface {
+            deg_u: 1,
+            deg_v,
+            nu: 2,
+            nv,
+            cps,
+            weights: None,
+            knots_u: vec![0.0, 0.0, 1.0, 1.0],
+            knots_v,
+            closed_u: false,
+            closed_v: false,
+            size: 0.0,
+        }
+        .finish();
+        let s = Surface::BSpline(b);
+        let (_, (v0, v1)) = match &s {
+            Surface::BSpline(b) => b.domain(),
+            _ => unreachable!(),
+        };
+        for i in 0..40 {
+            let v = v0 + (v1 - v0) * (0.5 + i as f64) / 40.0;
+            let p = s.point(0.5, v);
+            let (u2, v2) = s.uv(p, None);
+            assert!(
+                close(p, s.point(u2, v2), 1e-6),
+                "cold inversion off-surface at v={v}: residual {}",
+                p.sub(s.point(u2, v2)).len()
+            );
+            assert!(
+                (v2 - v).abs() < 0.5,
+                "cold inversion landed on the wrong fold: v={v} -> v2={v2}"
             );
         }
     }

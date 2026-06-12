@@ -536,10 +536,14 @@ fn maybe_write_debug(args: &Args, sf: &StepFile, stats: &TessStats) {
     // Pre-compute each sample's reference closure so we can order the excerpts
     // smallest-first: a single huge B-spline (thousands of control points) must
     // not bury the simple PLANE/CYLINDER cases past a copy-paste/scroll limit.
+    // The cap is a runaway guard only — a truncated closure drops the bound
+    // topology (the surface's control points expand first) and the excerpt
+    // stops being re-runnable, so it must comfortably exceed any real face.
+    const SUBGRAPH_CAP: usize = 200_000;
     let mut samples: Vec<(&String, u32, &'static str, Vec<u32>)> = stats
         .debug_samples
         .iter()
-        .map(|(ty, (face, reason))| (ty, *face, *reason, sf.subgraph(*face, 4000)))
+        .map(|(ty, (face, reason))| (ty, *face, *reason, sf.subgraph(*face, SUBGRAPH_CAP)))
         .collect();
     samples.sort_by(|a, b| a.3.len().cmp(&b.3.len()).then(a.0.cmp(b.0)));
 
@@ -549,10 +553,15 @@ fn maybe_write_debug(args: &Args, sf: &StepFile, stats: &TessStats) {
     out.push_str("/* ===== FAILURE SUMMARY =====\n");
     for (ty, face, reason, ids) in &samples {
         out.push_str(&format!(
-            "   {:<28} face #{:<10} ({:>4} entities)  {}\n",
+            "   {:<28} face #{:<10} ({:>4} entities{})  {}\n",
             ty,
             face,
             ids.len(),
+            if ids.len() >= SUBGRAPH_CAP {
+                ", TRUNCATED"
+            } else {
+                ""
+            },
             reason
         ));
     }

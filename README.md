@@ -365,6 +365,13 @@ cargo test
   - `inscribed_hole.step` — a planar face whose square hole is inscribed in its
     circular rim (corners on the rim): the corners poke through the rim's
     chords, so the hole is nudged inward to let tess2 recover the face.
+  - `two_edge_arc_sliver.step` — a planar sliver bounded by just a chord and a
+    shallow arc (vendor-model excerpt): arcs always keep at least 2 segments,
+    or the closed loop collapses to 2 points and the face is dropped.
+  - `cylinder_offset_seam_rims.step` — a cylinder band whose rims are *closed*
+    B-spline edges with the vertex half-way around the basis curve's seam
+    (vendor-model excerpt): the rim polylines are re-seamed at the vertex
+    instead of snapping the curve endpoints across the cylinder.
   - `colored.step` — a `STYLED_ITEM` chain: color map -> mesh bucket -> GLB
     material assertions.
   - merged mode: draw ranges tile every color mesh's index buffer exactly and

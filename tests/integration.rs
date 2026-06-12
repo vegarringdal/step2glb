@@ -217,6 +217,63 @@ fn full_cylinder_band_handles_the_seam() {
     }
 }
 
+// ------------------------------- two-edge sliver face (line + shallow arc)
+
+#[test]
+fn two_edge_arc_sliver_face_keeps_an_arc_point() {
+    // Vendor-model excerpt: a planar sliver bounded by exactly two edges, a
+    // chord and a ~12.7° arc (r 7.14). At a coarse deflection the arc used to
+    // discretize to a single chord, collapsing the closed loop to 2 points
+    // and dropping the face; arcs must always keep an interior point.
+    let sf = load("two_edge_arc_sliver.step");
+    let coarse = TessParams {
+        deflection: 1.0,
+        max_angle: 25.0_f64.to_radians(),
+    };
+    let colors = styles::build_color_map(&sf);
+    let (set, stats) = tessellate_with(&sf, &coarse, &colors, &["MANIFOLD_SOLID_BREP"]);
+    let mesh = set.merged();
+    assert_eq!(stats.faces_ok, 1, "sliver face must tessellate");
+    assert_eq!(stats.faces_failed, 0);
+    // chord 1.584, sagitta 0.044 -> at minimum one triangle of area ~0.035,
+    // converging to the lens area ~0.047 as the arc refines
+    let area = total_area(&mesh);
+    assert!(
+        (0.02..=0.06).contains(&area),
+        "sliver area out of range: {}",
+        area
+    );
+}
+
+// --------------- cylinder band, closed B-spline rims with off-seam vertices
+
+#[test]
+fn closed_bspline_rim_with_offset_seam_vertex_tessellates() {
+    // Vendor-model excerpt: a full cylinder band (r 2.5) whose rims are
+    // *closed* B-spline edges. The edge vertex sits half-way around the basis
+    // curve's own seam; the rim polylines must be re-seamed at the vertex
+    // instead of snapping the curve's endpoints across the cylinder (which
+    // used to self-intersect the UV contour and drop the face).
+    let sf = load("cylinder_offset_seam_rims.step");
+    let (set, stats) = tessellate_all(&sf, &["MANIFOLD_SOLID_BREP"]);
+    let mesh = set.merged();
+    assert_eq!(stats.faces_ok, 1, "band face must tessellate");
+    assert_eq!(stats.faces_failed, 0);
+    // wavy rims at |y| in 7.6..8.0 -> mean height ~15.6, area ~ 2*pi*2.5*15.6
+    let area = total_area(&mesh);
+    assert!(
+        (220.0..=270.0).contains(&area),
+        "band area out of range: {}",
+        area
+    );
+    // every vertex on the cylinder x^2 + (z-958)^2 = 2.5^2, |y| <= 8
+    for c in mesh.positions.chunks(3) {
+        let r = ((c[0] as f64).powi(2) + (c[2] as f64 - 958.0).powi(2)).sqrt();
+        assert!((r - 2.5).abs() < 1e-3, "off-cylinder point {:?}", c);
+        assert!((c[1] as f64).abs() <= 8.0 + 1e-3);
+    }
+}
+
 // -------------------------------------------------- hierarchy + transforms
 
 #[test]

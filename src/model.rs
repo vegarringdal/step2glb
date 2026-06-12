@@ -587,7 +587,11 @@ fn curve_polyline(sf: &StepFile, id: u32, a: V3, b: V3, tp: &TessParams) -> Opti
                 }
             }
             let step = angle_step(rx.max(ry), tp.deflection, tp.max_angle);
-            let nseg = (((t1 - t0) / step).ceil() as usize).max(1);
+            // at least 2 segments: a face bounded by just a chord and a
+            // shallow arc (a sliver) needs the arc's interior point, or the
+            // closed loop collapses to 2 points and the face loses its only
+            // boundary
+            let nseg = (((t1 - t0) / step).ceil() as usize).max(2);
             let mut pts = Vec::with_capacity(nseg + 1);
             for i in 0..=nseg {
                 let t = t0 + (t1 - t0) * i as f64 / nseg as f64;
@@ -743,7 +747,69 @@ fn bspline_polyline_core(
         let t = t0 + (t1 - t0) * i as f64 / nseg as f64;
         pts.push(bspline_curve_point(degree, &knots, &cps, w, t));
     }
+    let mut pts = align_polyline_to_vertices(pts, a, b);
     *pts.first_mut()? = a;
     *pts.last_mut()? = b;
     Some(pts)
+}
+
+/// Align a sampled basis-curve polyline with the edge's trimming vertices.
+/// Exporters trim edges to interior stretches of the basis curve, and close
+/// closed edges at a vertex away from the curve's own parametric seam —
+/// blindly snapping the curve's natural endpoints onto such vertices folds the
+/// polyline through long false chords (and the face's UV contour with it).
+fn align_polyline_to_vertices(pts: Vec<V3>, a: V3, b: V3) -> Vec<V3> {
+    let n = pts.len();
+    if n < 3 {
+        return pts;
+    }
+    let mut step = 0.0f64;
+    let mut len = 0.0f64;
+    for i in 1..n {
+        let d = pts[i].sub(pts[i - 1]).len();
+        step = step.max(d);
+        len += d;
+    }
+    let tol = step.max(1e-12);
+    if pts[0].sub(a).len() <= tol && pts[n - 1].sub(b).len() <= tol {
+        return pts; // vertices sit on the curve endpoints (the common case)
+    }
+    let nearest = |q: V3, ring: &[V3]| -> usize {
+        let mut bi = 0usize;
+        let mut bd = f64::MAX;
+        for (i, p) in ring.iter().enumerate() {
+            let d = p.sub(q).len();
+            if d < bd {
+                bd = d;
+                bi = i;
+            }
+        }
+        bi
+    };
+    if pts[0].sub(pts[n - 1]).len() <= 1e-6 * len.max(1e-9) {
+        // closed basis curve: walk the ring forward from a to b (an edge
+        // follows increasing parameter, wrapping through the curve's seam)
+        let ring = &pts[..n - 1];
+        let m = ring.len();
+        let ia = nearest(a, ring);
+        let span = if a.sub(b).len() <= tol {
+            m // closed edge: the full ring, re-seamed at the vertex
+        } else {
+            let ib = nearest(b, ring);
+            if ia == ib {
+                return pts; // degenerate trim: keep the old behaviour
+            }
+            (ib + m - ia) % m
+        };
+        (0..=span).map(|k| ring[(ia + k) % m]).collect()
+    } else {
+        // open curve trimmed to an interior stretch
+        let ia = nearest(a, &pts);
+        let ib = nearest(b, &pts);
+        if ia < ib {
+            pts[ia..=ib].to_vec()
+        } else {
+            pts // vertices against the parameter direction: leave as-is
+        }
+    }
 }
