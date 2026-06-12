@@ -337,6 +337,73 @@ impl StepFile {
     pub fn header(&self) -> &[u8] {
         &self.data[self.header_range.0..self.header_range.1]
     }
+
+    /// Reconstruct the Part-21 source line for one entity from its indexed
+    /// byte range: `#id=TYPE(params);`, or `#id=(LEAF1(..) LEAF2(..));` for a
+    /// complex instance. Used by `--debug-print` to re-emit failing faces.
+    pub fn entity_source(&self, id: u32) -> Option<String> {
+        let rec = self.entities.get(&id)?;
+        let body = std::str::from_utf8(&self.data[rec.start as usize..rec.end as usize])
+            .ok()?
+            .trim();
+        let ty = self.entity_type(id)?;
+        Some(if ty == TYPE_COMPLEX {
+            format!("#{}=({});", id, body)
+        } else {
+            format!("#{}={}({});", id, ty, body)
+        })
+    }
+
+    /// Every `#id` reference inside an entity's parameter bytes. Scans for the
+    /// `#<digits>` token, so it is robust across simple, typed and complex
+    /// records without re-parsing the value tree.
+    pub fn entity_refs(&self, id: u32) -> Vec<u32> {
+        let rec = match self.entities.get(&id) {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        let body = &self.data[rec.start as usize..rec.end as usize];
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < body.len() {
+            if body[i] == b'#' {
+                let mut j = i + 1;
+                let mut val: u32 = 0;
+                while j < body.len() && body[j].is_ascii_digit() {
+                    val = val * 10 + u32::from(body[j] - b'0');
+                    j += 1;
+                }
+                if j > i + 1 {
+                    out.push(val);
+                    i = j;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// Transitive closure of references reachable from `root` (inclusive),
+    /// capped at `limit` entities, returned in ascending id order so an
+    /// excerpt reads top-to-bottom.
+    pub fn subgraph(&self, root: u32, limit: usize) -> Vec<u32> {
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            if seen.len() >= limit || !seen.insert(id) {
+                continue;
+            }
+            for r in self.entity_refs(id) {
+                if !seen.contains(&r) {
+                    stack.push(r);
+                }
+            }
+        }
+        let mut ids: Vec<u32> = seen.into_iter().collect();
+        ids.sort_unstable();
+        ids
+    }
 }
 
 // ------------------------------------------------------------------ lexing
@@ -640,6 +707,43 @@ END-ISO-10303-21;
             }
             other => panic!("expected typed param, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn entity_source_refs_and_subgraph_round_trip() {
+        let sf = parse(MINI);
+
+        // refs are scanned straight from the bytes, including inside lists
+        let mut r = sf.entity_refs(3);
+        r.sort_unstable();
+        assert_eq!(r, vec![2, 10, 20]); // (#10,#20) bounds + #2 surface
+
+        // a simple entity reconstructs to re-parseable Part-21
+        assert!(sf
+            .entity_source(1)
+            .unwrap()
+            .starts_with("#1=CARTESIAN_POINT("));
+        // a complex instance keeps its leaf structure inside outer parens
+        let cs = sf.entity_source(4).unwrap();
+        assert!(cs.starts_with("#4=(") && cs.contains("SI_UNIT(.MILLI.,.METRE.)"));
+        // a missing id yields nothing rather than panicking
+        assert!(sf.entity_source(999).is_none());
+
+        // subgraph from #5 (MEASURE_WITH_UNIT -> #4 unit) pulls the unit in
+        assert_eq!(sf.subgraph(5, 100), vec![4, 5]);
+
+        // round-trip: a DATA section rebuilt from the excerpt re-parses, and
+        // the reconstructed entities carry the same types and references
+        let mut doc = String::from("ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\n");
+        for id in sf.subgraph(5, 100) {
+            doc.push_str(&sf.entity_source(id).unwrap());
+            doc.push('\n');
+        }
+        doc.push_str("ENDSEC;\nEND-ISO-10303-21;\n");
+        let re = parse(&doc);
+        assert_eq!(re.entities.len(), 2);
+        assert!(re.is_complex(4));
+        assert_eq!(re.params(5).unwrap()[1].as_ref_id(), Some(4));
     }
 
     #[test]
