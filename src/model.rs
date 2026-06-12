@@ -532,11 +532,17 @@ pub fn edge_polyline(sf: &StepFile, id: u32, tp: &TessParams) -> Option<Vec<V3>>
     let p = sf.params(edge_id)?;
     let sv = vertex_point(sf, p.get(1)?.as_ref_id()?)?;
     let ev = vertex_point(sf, p.get(2)?.as_ref_id()?)?;
-    let curve = p.get(3)?.as_ref_id()?;
+    // The 3D curve may be omitted ($): a legal EDGE_CURVE between two known
+    // vertices with no separate geometry is a straight segment. Don't let a
+    // null (or unresolved) curve drop the whole edge — and hence the loop and
+    // the entire face — to None.
+    let curve = p.get(3).and_then(|v| v.as_ref_id());
     let same_sense = p.get(4).and_then(|v| v.as_bool()).unwrap_or(true);
 
     let (a, b) = if same_sense { (sv, ev) } else { (ev, sv) };
-    let mut pts = curve_polyline(sf, curve, a, b, tp).unwrap_or_else(|| vec![a, b]);
+    let mut pts = curve
+        .and_then(|c| curve_polyline(sf, c, a, b, tp))
+        .unwrap_or_else(|| vec![a, b]);
     if !same_sense {
         pts.reverse();
     }

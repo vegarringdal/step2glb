@@ -304,7 +304,7 @@ let asm = step2glb::hierarchy::build(&sf);
 | --------- | -------------------------------------------------------------------------- |
 | Solids    | `MANIFOLD_SOLID_BREP`, `BREP_WITH_VOIDS`, `FACETED_BREP`, `SHELL_BASED_SURFACE_MODEL`, `FACE_BASED_SURFACE_MODEL` |
 | Surfaces  | `PLANE`, `CYLINDRICAL_SURFACE`, `CONICAL_SURFACE`, `SPHERICAL_SURFACE`, `TOROIDAL_SURFACE`, `SURFACE_OF_LINEAR_EXTRUSION`, `SURFACE_OF_REVOLUTION`, `B_SPLINE_SURFACE_WITH_KNOTS` incl. the rational complex-instance form (+ near-planar fallback via Newell plane fit) |
-| Curves    | `LINE`, `CIRCLE`, `ELLIPSE`, `B_SPLINE_CURVE_WITH_KNOTS` (incl. rational complex form), `POLYLINE`, `TRIMMED_CURVE`, `SURFACE_CURVE`/`SEAM_CURVE` (via 3D curve); anything else falls back to a straight segment |
+| Curves    | `LINE`, `CIRCLE`, `ELLIPSE`, `B_SPLINE_CURVE_WITH_KNOTS` (incl. rational complex form), `POLYLINE`, `TRIMMED_CURVE`, `SURFACE_CURVE`/`SEAM_CURVE` (via 3D curve); a null (`$`) or otherwise unresolved edge curve, and anything else, falls back to a straight segment between the edge vertices |
 | Tessellated | `TRIANGULATED_FACE_SET`, `TRIANGULATED_SURFACE_SET`, `TESSELLATED_SOLID`, `TESSELLATED_SHELL` |
 | Instancing | `MAPPED_ITEM` / `REPRESENTATION_MAP`, NAUO assembly instances             |
 | Presentation | `STYLED_ITEM`, `OVER_RIDING_STYLED_ITEM` -> `COLOUR_RGB` / `DRAUGHTING_PRE_DEFINED_COLOUR` |
@@ -355,6 +355,9 @@ cargo test
     (one meridian edge walked out and back): full 4πr² area.
   - `cone_complex_curve.step` — a cone sliver bounded by a rational B-spline
     conic in complex-instance form: all points on the cone.
+  - `null_curve_edge.step` — a face whose boundary has an edge with a null
+    (`$`) 3D curve: the edge becomes a straight segment instead of dropping
+    the whole face (regression for a real exporter quirk).
   - `colored.step` — a `STYLED_ITEM` chain: color map -> mesh bucket -> GLB
     material assertions.
   - merged mode: draw ranges tile every color mesh's index buffer exactly and

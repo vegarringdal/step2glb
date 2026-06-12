@@ -94,6 +94,21 @@ fn planar_triangle_face_tessellates_exactly() {
     }
 }
 
+// ----------------------------------------------- edge with a null 3D curve
+
+#[test]
+fn edge_with_null_curve_falls_back_to_a_segment() {
+    // A loop edge whose 3D curve is `$` is a straight segment between its
+    // vertices; it must not drop the edge -> loop -> whole face to a skip.
+    let sf = load("null_curve_edge.step");
+    let (set, stats) = tessellate_all(&sf, &["MANIFOLD_SOLID_BREP"]);
+    let mesh = set.merged();
+    assert_eq!(stats.faces_ok, 1, "face must tessellate, not be skipped");
+    assert_eq!(stats.faces_failed, 0);
+    // right triangle with legs 12 and 8 -> area 48
+    assert!((total_area(&mesh) - 48.0).abs() < 1e-6);
+}
+
 // -------------------------------------------- periodic full cylinder band
 
 #[test]
