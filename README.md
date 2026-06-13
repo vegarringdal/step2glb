@@ -82,7 +82,8 @@ is required, and its current bindings need a reasonably recent stable Rust
 # convert; writes model.glb next to the input
 step2glb model.step
 
-# choose output and tessellation quality (deflection is in file units, e.g. mm)
+# choose output and tessellation quality (deflection is in mm, converted into
+# the file's modeling unit so the value means the same regardless of mm/inch/m)
 step2glb model.step -o out.glb --deflection 0.05 --max-angle 15
 
 # NOTE: the tighter of the two bounds wins per feature. A curved face with
@@ -94,10 +95,11 @@ step2glb model.step -o out.glb --deflection 0.05 --max-angle 15
 # one mesh per color + draw-range metadata (rvm_parser_glb layout)
 step2glb model.step --merged
 
-# smaller files: drop normals (viewers flat-shade), or full rvm-style cleanup
-# (position weld + meshopt simplify + no normals) — both work with and
-# without --merged
-step2glb model.step --no-normals
+# normals are OFF by default (smaller files, harder position welding, viewers
+# flat-shade); pass --normals to keep the tessellator's exact analytic normals
+step2glb model.step --normals
+# full rvm-style cleanup (position weld + meshopt simplify, always drops
+# normals) — works with and without --merged
 step2glb model.step --cleanup-position
 
 # just print the assembly tree
@@ -412,4 +414,5 @@ resolver differences are harmless.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 Vegar Ringdal. Free to use,
+modify and distribute, including commercially.

@@ -9,7 +9,9 @@
 //! - plane + the quadrics (closed-form UV inversion)
 //! - surfaces of linear extrusion / revolution (reduced to quadrics where
 //!   possible, otherwise seeded 1D Newton inversion)
-//! - (rational) B-spline surfaces, trimmed via seeded 2D Newton projection
+//! - (rational) B-spline surfaces, trimmed via seeded 2D Newton projection;
+//!   a near-full-patch B-spline whose inverted boundary defeats tess2 (extreme
+//!   -aspect lofted strips) falls back to gridding the knot domain directly
 //! - faces that wrap fully around a periodic direction (cylinder bands,
 //!   closed revolutions, ...) are cut at a seam and rebuilt as band polygons
 //! - boundary loops that encircle a sphere pole / cone apex are closed with a
@@ -718,11 +720,17 @@ fn face_to_mesh(
     }
 
     let contours: Vec<Vec<[f64; 2]>> = loops_uv.into_iter().map(|l| l.uv).collect();
-    ok_or(
-        emit_uv_region(surf, &contours, tp, same_sense, mesh),
-        "UV tessellation produced no triangles \
-         (tess2 failed: degenerate or self-intersecting UV contour)",
-    )
+    if emit_uv_region(surf, &contours, tp, same_sense, mesh) {
+        return Ok(());
+    }
+    // tess2 can choke on the inverted boundary of an extreme-aspect lofted
+    // strip; if the boundary spans (almost) the whole knot domain, grid the
+    // patch directly rather than dropping the face.
+    if tessellate_full_patch(surf, &contours, tp, same_sense, mesh) {
+        return Ok(());
+    }
+    Err("UV tessellation produced no triangles \
+         (tess2 failed: degenerate or self-intersecting UV contour)")
 }
 
 fn ok_or(success: bool, reason: &'static str) -> Result<(), &'static str> {
@@ -783,6 +791,29 @@ fn tess2_with_shrunk_holes(loops_uv: &[Vec<[f64; 2]>], su: f64, sv: f64) -> Opti
     None
 }
 
+/// Metric scale that maps UV close to the 3D arc-length metric, so tess2 and
+/// the refinement passes work in (almost) isometric coordinates. Anisotropic
+/// UV (e.g. a sphere strip) otherwise produces needle triangles that can fold
+/// when mapped onto curvature. Normalized so the larger extent maps to ~1.
+fn metric_scale(surf: &Surface, umin: f64, umax: f64, vmin: f64, vmax: f64) -> (f64, f64) {
+    let du = (umax - umin).max(1e-12);
+    let dv = (vmax - vmin).max(1e-12);
+    let (uc, vc) = ((umin + umax) * 0.5, (vmin + vmax) * 0.5);
+    let h = 1e-4;
+    let lu = surf
+        .point(uc + h * du, vc)
+        .sub(surf.point(uc - h * du, vc))
+        .len()
+        / (2.0 * h * du);
+    let lv = surf
+        .point(uc, vc + h * dv)
+        .sub(surf.point(uc, vc - h * dv))
+        .len()
+        / (2.0 * h * dv);
+    let size = (lu * du).max(lv * dv).max(1e-12);
+    ((lu / size).max(1e-9 / du), (lv / size).max(1e-9 / dv))
+}
+
 /// Triangulate closed UV contours (odd winding -> holes), refine for
 /// curvature + chord deviation, map to 3D and append to `mesh`.
 fn emit_uv_region(
@@ -792,9 +823,6 @@ fn emit_uv_region(
     same_sense: bool,
     mesh: &mut TriMesh,
 ) -> bool {
-    // Scale UV close to the 3D metric so tess2 triangulates in (almost)
-    // isometric coordinates. Anisotropic UV (e.g. a sphere strip) otherwise
-    // produces needle triangles that can fold when mapped onto curvature.
     let (su, sv) = {
         let (mut umin, mut umax, mut vmin, mut vmax) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
         for l in loops_uv {
@@ -805,31 +833,33 @@ fn emit_uv_region(
                 vmax = vmax.max(p[1]);
             }
         }
-        let du = (umax - umin).max(1e-12);
-        let dv = (vmax - vmin).max(1e-12);
-        let (uc, vc) = ((umin + umax) * 0.5, (vmin + vmax) * 0.5);
-        let h = 1e-4;
-        let lu = surf
-            .point(uc + h * du, vc)
-            .sub(surf.point(uc - h * du, vc))
-            .len()
-            / (2.0 * h * du);
-        let lv = surf
-            .point(uc, vc + h * dv)
-            .sub(surf.point(uc, vc - h * dv))
-            .len()
-            / (2.0 * h * dv);
-        let size = (lu * du).max(lv * dv).max(1e-12);
-        // metric scale, normalized so the larger extent maps to ~1
-        ((lu / size).max(1e-9 / du), (lv / size).max(1e-9 / dv))
+        metric_scale(surf, umin, umax, vmin, vmax)
     };
 
-    let (verts_uv, mut tris) = match run_tess2(loops_uv, su, sv)
+    let (verts_uv, tris) = match run_tess2(loops_uv, su, sv)
         .or_else(|| tess2_with_shrunk_holes(loops_uv, su, sv))
     {
         Some(r) => r,
         None => return false,
     };
+    refine_and_emit(surf, verts_uv, tris, su, sv, tp, same_sense, mesh);
+    true
+}
+
+/// Shared tail of every UV-space tessellation: drop tess2's zero-area
+/// triangles, normalize winding, curvature-refine, then map to 3D with
+/// normals and append to `mesh`. `(su, sv)` is the metric scale of the source
+/// region (see [`metric_scale`]).
+fn refine_and_emit(
+    surf: &Surface,
+    verts_uv: Vec<[f64; 2]>,
+    mut tris: Vec<[u32; 3]>,
+    su: f64,
+    sv: f64,
+    tp: &TessParams,
+    same_sense: bool,
+    mesh: &mut TriMesh,
+) {
     // tess2 emits zero-area triangles along collinear contour stretches
     // (e.g. a meridian boundary). They cover nothing in UV, but mapped onto
     // a curved surface their corners no longer align — phantom secant
@@ -896,6 +926,101 @@ fn emit_uv_region(
         mesh.indices.push(base + b);
         mesh.indices.push(base + c);
     }
+}
+
+/// Fallback for a near-full-patch B-spline face whose Newton-inverted boundary
+/// self-intersects in (metric) UV. Extreme-aspect lofted strips — a thin
+/// ribbon swept along a long, folded path — invert their two long rails onto
+/// u≈0 and u≈1; rail-inversion noise then crosses the seam at the tiny u scale
+/// tess2 works in, and tess2 bails with no triangles. The knot domain *is* the
+/// patch, so grid the covered UV rectangle and curvature-refine it instead of
+/// triangulating the noisy contour. Gated on the boundary spanning most of the
+/// domain in both directions, so genuinely-trimmed faces are left to fail
+/// rather than be over-filled.
+fn tessellate_full_patch(
+    surf: &Surface,
+    contours: &[Vec<[f64; 2]>],
+    tp: &TessParams,
+    same_sense: bool,
+    mesh: &mut TriMesh,
+) -> bool {
+    let b = match surf {
+        Surface::BSpline(b) => b,
+        _ => return false,
+    };
+    // a single boundary only: with inner loops a full-domain grid fills holes
+    if contours.len() != 1 || contours[0].len() < 3 {
+        return false;
+    }
+    let ((u0, u1), (v0, v1)) = b.domain();
+    let (mut umin, mut umax, mut vmin, mut vmax) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    for p in &contours[0] {
+        umin = umin.min(p[0]);
+        umax = umax.max(p[0]);
+        vmin = vmin.min(p[1]);
+        vmax = vmax.max(p[1]);
+    }
+    let (du, dv) = ((u1 - u0).abs(), (v1 - v0).abs());
+    if du < 1e-12 || dv < 1e-12 {
+        return false;
+    }
+    if (umax - umin) < 0.8 * du || (vmax - vmin) < 0.8 * dv {
+        return false; // genuinely trimmed in some direction: don't over-fill
+    }
+    let uu = (umin.clamp(u0, u1), umax.clamp(u0, u1));
+    let vv = (vmin.clamp(v0, v1), vmax.clamp(v0, v1));
+    tessellate_uv_grid(surf, uu, vv, tp, same_sense, mesh)
+}
+
+/// Grid a UV rectangle into a triangle mesh at ~2 samples per knot span (dense
+/// enough that midpoint refinement does not alias fast folds), then run the
+/// shared curvature refinement + 3D mapping. Returns false on a degenerate
+/// (empty) grid.
+fn tessellate_uv_grid(
+    surf: &Surface,
+    (u0, u1): (f64, f64),
+    (v0, v1): (f64, f64),
+    tp: &TessParams,
+    same_sense: bool,
+    mesh: &mut TriMesh,
+) -> bool {
+    let (mut nu, mut nv) = match surf {
+        Surface::BSpline(b) => (
+            (b.nu.saturating_sub(b.deg_u).max(1) * 2).clamp(2, 64),
+            (b.nv.saturating_sub(b.deg_v).max(1) * 2).clamp(2, 8192),
+        ),
+        _ => (8, 8),
+    };
+    // bound the starting mesh; refinement only adds triangles, so leave room
+    while nu * nv > 200_000 {
+        if nv > nu {
+            nv /= 2;
+        } else {
+            nu /= 2;
+        }
+    }
+    let mut verts: Vec<[f64; 2]> = Vec::with_capacity((nu + 1) * (nv + 1));
+    for j in 0..=nv {
+        let v = v0 + (v1 - v0) * j as f64 / nv as f64;
+        for i in 0..=nu {
+            let u = u0 + (u1 - u0) * i as f64 / nu as f64;
+            verts.push([u, v]);
+        }
+    }
+    let w = (nu + 1) as u32;
+    let mut tris: Vec<[u32; 3]> = Vec::with_capacity(nu * nv * 2);
+    for j in 0..nv as u32 {
+        for i in 0..nu as u32 {
+            let a = j * w + i;
+            tris.push([a, a + 1, a + w + 1]);
+            tris.push([a, a + w + 1, a + w]);
+        }
+    }
+    if tris.is_empty() {
+        return false;
+    }
+    let (su, sv) = metric_scale(surf, u0, u1, v0, v1);
+    refine_and_emit(surf, verts, tris, su, sv, tp, same_sense, mesh);
     true
 }
 
@@ -1570,5 +1695,130 @@ fn delaunay_flip(verts: &[[f64; 2]], tris: &mut Vec<[u32; 3]>, su: f64, sv: f64)
         if flips == 0 {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geom::{v3, BSplineSurface, Surface};
+
+    /// A 0.5 mm-wide ribbon folded back and forth several times along v — the
+    /// extreme-aspect lofted strip that defeats tess2 on its inverted boundary
+    /// (cf. vendor faces #4941516 / #4947113). Thin in u, long and folded in v.
+    fn folded_ribbon() -> Surface {
+        let nv = 60usize;
+        let deg_v = 3usize;
+        let width = 0.5;
+        let mut cps = Vec::new();
+        for iu in 0..2 {
+            for k in 0..nv {
+                cps.push(v3(2.0 * k as f64, 40.0 * (0.4 * k as f64).sin(), iu as f64 * width));
+            }
+        }
+        let mut knots_v = vec![0.0; deg_v + 1];
+        for k in 1..(nv - deg_v) {
+            knots_v.push(k as f64);
+        }
+        knots_v.extend(std::iter::repeat_n((nv - deg_v) as f64, deg_v + 1));
+        Surface::BSpline(
+            BSplineSurface {
+                deg_u: 1,
+                deg_v,
+                nu: 2,
+                nv,
+                cps,
+                weights: None,
+                knots_u: vec![0.0, 0.0, 1.0, 1.0],
+                knots_v,
+                closed_u: false,
+                closed_v: false,
+                size: 0.0,
+            }
+            .finish(),
+        )
+    }
+
+    fn domain(s: &Surface) -> ((f64, f64), (f64, f64)) {
+        match s {
+            Surface::BSpline(b) => b.domain(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// True surface area from a dense reference grid.
+    fn ref_area(s: &Surface) -> f64 {
+        let ((u0, u1), (v0, v1)) = domain(s);
+        let (nu, nv) = (8usize, 4000usize);
+        let pt = |i: usize, j: usize| {
+            s.point(u0 + (u1 - u0) * i as f64 / nu as f64, v0 + (v1 - v0) * j as f64 / nv as f64)
+        };
+        let mut a = 0.0;
+        for j in 0..nv {
+            for i in 0..nu {
+                let (p00, p10, p01, p11) = (pt(i, j), pt(i + 1, j), pt(i, j + 1), pt(i + 1, j + 1));
+                a += p10.sub(p00).cross(p01.sub(p00)).len() * 0.5;
+                a += p10.sub(p11).cross(p01.sub(p11)).len() * 0.5;
+            }
+        }
+        a
+    }
+
+    fn mesh_area(m: &TriMesh) -> f64 {
+        let p = |i: u32| {
+            v3(
+                m.positions[i as usize * 3] as f64,
+                m.positions[i as usize * 3 + 1] as f64,
+                m.positions[i as usize * 3 + 2] as f64,
+            )
+        };
+        m.indices
+            .chunks(3)
+            .map(|t| p(t[1]).sub(p(t[0])).cross(p(t[2]).sub(p(t[0]))).len() * 0.5)
+            .sum()
+    }
+
+    #[test]
+    fn full_patch_grid_recovers_a_folded_strip_that_defeats_tess2() {
+        let s = folded_ribbon();
+        let ((u0, u1), (v0, v1)) = domain(&s);
+        // the face boundary covers the whole knot domain (rails + caps)
+        let contour = vec![vec![[u0, v0], [u1, v0], [u1, v1], [u0, v1]]];
+        let tp = TessParams { deflection: 0.1, max_angle: 20.0_f64.to_radians() };
+        let mut mesh = TriMesh::default();
+        assert!(
+            tessellate_full_patch(&s, &contour, &tp, true, &mut mesh),
+            "full-patch fallback must accept and grid the strip"
+        );
+        let (got, want) = (mesh_area(&mesh), ref_area(&s));
+        // The decisive anti-garbage check: triangles that bridge across folds
+        // (tess2's failure mode here, and what the pre-fix path produced) add
+        // huge spurious area — the broken mesh measured ~800x the true area.
+        assert!((got - want).abs() < 0.02 * want, "gridded area {got} vs reference {want}");
+        // and it must actually have gridded the strip, not collapsed to a few
+        // spanning triangles
+        assert!(mesh.indices.len() / 3 > 100, "implausibly few triangles");
+        // every vertex lies on the surface
+        for c in mesh.positions.chunks(3) {
+            let p = v3(c[0] as f64, c[1] as f64, c[2] as f64);
+            let (u, v) = s.uv(p, None);
+            assert!(s.point(u, v).sub(p).len() < 1e-2, "off-surface vertex {p:?}");
+        }
+    }
+
+    #[test]
+    fn full_patch_gate_rejects_a_genuinely_trimmed_boundary() {
+        let s = folded_ribbon();
+        let ((u0, u1), (v0, v1)) = domain(&s);
+        // a boundary spanning only the first ~30% of v must NOT be grid-filled
+        let vm = v0 + 0.3 * (v1 - v0);
+        let contour = vec![vec![[u0, v0], [u1, v0], [u1, vm], [u0, vm]]];
+        let tp = TessParams { deflection: 0.1, max_angle: 20.0_f64.to_radians() };
+        let mut mesh = TriMesh::default();
+        assert!(
+            !tessellate_full_patch(&s, &contour, &tp, true, &mut mesh),
+            "a 30%-coverage boundary must not be treated as full-patch"
+        );
+        assert!(mesh.indices.is_empty(), "rejected gate must not emit geometry");
     }
 }

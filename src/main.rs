@@ -29,7 +29,9 @@ struct Args {
     #[arg(short, long)]
     output: Option<PathBuf>,
 
-    /// Chordal deflection used for tessellation, in file units (e.g. mm)
+    /// Chordal deflection (max sag) for tessellation, in millimetres. It is
+    /// converted into the file's modeling unit, so the same value means the
+    /// same physical tolerance whether the file is in mm, inch or metre
     #[arg(short, long, default_value_t = 1.0)]
     deflection: f64,
 
@@ -59,10 +61,12 @@ struct Args {
     #[arg(long)]
     cleanup_position: bool,
 
-    /// Skip vertex normals in the output: positions weld harder and files
-    /// shrink; viewers flat-shade or compute their own normals
+    /// Include vertex normals in the output. Off by default — positions then
+    /// weld harder (face-boundary vertices merge) and files shrink; viewers
+    /// flat-shade or compute their own. --cleanup-position drops normals
+    /// regardless
     #[arg(long)]
-    no_normals: bool,
+    normals: bool,
 
     /// Quantization decimals for --cleanup-position, in file units
     #[arg(long, default_value_t = 3)]
@@ -118,6 +122,8 @@ fn main() {
     tessellate::install_panic_guard();
     let t0 = Instant::now();
 
+    let threads = resolve_threads(&args);
+
     let data = match std::fs::read(&args.input) {
         Ok(d) => d,
         Err(e) => {
@@ -144,6 +150,20 @@ fn main() {
         eprintln!("warn: {}", w);
     }
 
+    // The model's geometry (length) unit. `--deflection` is specified in mm
+    // and converted into this unit for tessellation, so the same number means
+    // the same physical chord tolerance regardless of how the file models
+    // length. The same scale also takes the GLB to meters at export.
+    let file_unit_scale = detect_length_unit(&sf);
+    let mm_per_unit = file_unit_scale * 1000.0;
+    let deflection_file = if (mm_per_unit - 1.0).abs() < 1e-9 {
+        args.deflection // file already in mm: keep the value exactly
+    } else {
+        args.deflection / mm_per_unit
+    };
+    let output_scale = if args.no_unit_scale { 1.0 } else { file_unit_scale };
+    print_settings(&args, threads, file_unit_scale);
+
     if args.stats {
         print_entity_stats(&sf);
     }
@@ -162,7 +182,7 @@ fn main() {
 
     // ---------------------------------------------------------- tessellation
     let tp = TessParams {
-        deflection: args.deflection,
+        deflection: deflection_file,
         max_angle: args.max_angle.to_radians(),
     };
     let mut stats = TessStats::default();
@@ -173,12 +193,6 @@ fn main() {
     if !colors.is_empty() && args.stats {
         eprintln!("found {} styled (colored) items", colors.len());
     }
-    let threads = args.threads.filter(|&n| n > 0).unwrap_or_else(|| {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
-            .min(4)
-    });
     if threads > 1 {
         eprintln!("tessellating with {} threads", threads);
     }
@@ -191,16 +205,11 @@ fn main() {
 
     // ------------------------------------------------------------ merged mode
     if args.merged {
-        let scale = if args.no_unit_scale {
-            1.0
-        } else {
-            detect_length_unit(&sf)
-        };
         let opts = merge::MergeOptions {
-            unit_scale: scale,
+            unit_scale: output_scale,
             rotate_z_up: args.up_axis == UpAxis::Z,
             optimize: !args.no_optimize,
-            drop_normals: args.no_normals,
+            drop_normals: !args.normals,
             cleanup: args.cleanup_position.then_some(merge::Cleanup {
                 precision: args.cleanup_precision,
                 threshold: simplify_threshold(&args),
@@ -374,12 +383,7 @@ fn main() {
     }
 
     // -------------------------------------------- unit scale + up-axis root
-    let scale = if args.no_unit_scale {
-        1.0
-    } else {
-        detect_length_unit(&sf)
-    };
-    let mut root_m = M4::scale_uniform(scale);
+    let mut root_m = M4::scale_uniform(output_scale);
     if args.up_axis == UpAxis::Z {
         root_m = M4::Z_UP_TO_Y_UP.mul(root_m);
     }
@@ -432,6 +436,160 @@ fn write_out(out_path: &std::path::Path, bytes: &[u8], t0: Instant) {
     );
 }
 
+/// Effective tessellation worker count: the `--threads` value if positive,
+/// else auto (CPU cores capped at 4).
+fn resolve_threads(args: &Args) -> usize {
+    args.threads.filter(|&n| n > 0).unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(4)
+    })
+}
+
+/// STEP length-unit name for a file-unit→metre scale factor (for display).
+fn unit_label(scale_to_m: f64) -> &'static str {
+    for (s, name) in [
+        (1e-6, "µm"),
+        (0.001, "mm"),
+        (0.01, "cm"),
+        (0.1, "dm"),
+        (1.0, "m"),
+        (1000.0, "km"),
+        (0.0254, "inch"),
+        (0.3048, "foot"),
+    ] {
+        if (scale_to_m / s - 1.0).abs() < 1e-6 {
+            return name;
+        }
+    }
+    "file units"
+}
+
+/// Echo the effective configuration (resolved defaults included) at startup, so
+/// a run's settings are visible without re-deriving them from the command line.
+/// `file_unit_scale` is the detected file-unit→metre factor.
+fn print_settings(args: &Args, threads: usize, file_unit_scale: f64) {
+    let onoff = |b: bool| if b { "on" } else { "off" };
+    let out = args
+        .output
+        .clone()
+        .unwrap_or_else(|| args.input.with_extension("glb"));
+    let tree_only = args.tree && !args.stats;
+    let unit = unit_label(file_unit_scale);
+    let mm_per_unit = file_unit_scale * 1000.0;
+
+    eprintln!("settings:");
+    eprintln!("  input             {}", args.input.display());
+    if tree_only {
+        eprintln!("  mode              tree (print hierarchy, no GLB written)");
+    } else {
+        eprintln!("  output            {}", out.display());
+        eprintln!(
+            "  mode              {}",
+            if args.merged {
+                "merged (one node/mesh per color, baked to world space)"
+            } else {
+                "hierarchical (per-part nodes)"
+            }
+        );
+    }
+    // deflection is always given in mm; for non-mm files show what that is in
+    // the file's own unit (what tessellation actually uses)
+    if (mm_per_unit - 1.0).abs() < 1e-9 {
+        eprintln!("  deflection        {} mm", args.deflection);
+    } else {
+        eprintln!(
+            "  deflection        {} mm (= {:.5} {} in file units)",
+            args.deflection,
+            args.deflection / mm_per_unit,
+            unit
+        );
+    }
+    eprintln!("  max-angle         {}°", args.max_angle);
+    eprintln!(
+        "  threads           {}{}",
+        threads,
+        if args.threads.filter(|&n| n > 0).is_none() {
+            " (auto)"
+        } else {
+            ""
+        }
+    );
+    eprintln!(
+        "  up-axis           {}",
+        match args.up_axis {
+            UpAxis::Z => "z (rotate to glTF Y-up)",
+            UpAxis::Y => "y (kept as-is)",
+        }
+    );
+    eprintln!(
+        "  unit-scale        {}",
+        if args.no_unit_scale {
+            format!("off (output kept in {unit})")
+        } else {
+            format!("{unit} → meters")
+        }
+    );
+    // normals: --cleanup-position always drops them, so show the effective state
+    if args.normals && args.cleanup_position {
+        eprintln!("  normals           off (dropped by --cleanup-position)");
+    } else {
+        eprintln!("  normals           {}", onoff(args.normals));
+    }
+    // meshoptimizer is applied per item — once per unique mesh in the default
+    // (hierarchical) output, once per part instance in merged mode
+    let item = if args.merged { "per part" } else { "per unique mesh" };
+    if args.no_optimize {
+        eprintln!("  optimize          off");
+    } else {
+        eprintln!("  optimize          on ({item})");
+        eprintln!(
+            "    meshopt         weld duplicates{}, vertex-cache, vertex-fetch",
+            if args.normals && !args.cleanup_position {
+                ""
+            } else {
+                " (by position)"
+            }
+        );
+    }
+    let simplify = |what: &str, th: f32, te: f32| {
+        eprintln!("  {what}");
+        eprintln!(
+            "    meshopt         simplify → {:.0}% of indices, target-error {}, border locked",
+            th * 100.0,
+            te
+        );
+    };
+    if args.cleanup_position {
+        simplify(
+            &format!(
+                "cleanup-position  on (weld grid {} decimals, {item})",
+                args.cleanup_precision
+            ),
+            simplify_threshold(args),
+            simplify_target_error(args),
+        );
+    } else if let Some((th, te)) = simplify_only(args) {
+        eprintln!("  cleanup-position  off");
+        simplify(&format!("simplify          on ({item})"), th, te);
+    } else {
+        eprintln!("  cleanup-position  off");
+    }
+    if args.stats {
+        eprintln!("  stats             on");
+    }
+    if args.tree && args.stats {
+        eprintln!("  tree              on (with --stats: prints tree and still writes GLB)");
+    }
+    if args.debug_print {
+        eprintln!(
+            "  debug-print       on (failing-face excerpts → {})",
+            args.input.with_extension("debug.txt").display()
+        );
+    }
+}
+
 fn simplify_threshold(args: &Args) -> f32 {
     args.meshopt_threshold.unwrap_or(0.75)
 }
@@ -456,7 +614,7 @@ fn prepare_mesh(tm: &mut MeshSet, args: &Args) {
     if tm.is_empty() {
         return;
     }
-    if args.no_normals {
+    if !args.normals {
         tm.drop_normals();
     }
     if !args.no_optimize {

@@ -3,6 +3,7 @@ name = "step2glb"
 version = "0.1.0"
 edition = "2021"
 description = "Low-memory STEP (ISO 10303-21) parser: hierarchy dump + tessellation to GLB"
+authors = ["Vegar Ringdal <vegar.ringdal@postboxen.no>"]
 license = "MIT"
 
 [dependencies]
