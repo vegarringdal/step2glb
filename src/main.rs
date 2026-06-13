@@ -225,7 +225,7 @@ fn main() {
             std::process::exit(2);
         }
         eprintln!(
-            "merged {} parts ({} unique meshes, ~{:.1}x instance expansion) \
+            "merged {} draw calls ({} unique meshes, ~{:.1}x expansion) \
              into {} color meshes ({} faces ok, {} skipped) in {:.2?}",
             merged.part_count(),
             unique,

@@ -175,13 +175,18 @@ both RVM and STEP input:
 }]
 ```
 
-Ids are assigned depth-first over the expanded assembly (so a part that is
-instanced five times gets five ids and five draw ranges). A part whose
-geometry spans several colors gets one range per color mesh under the same
-id. Within each merged mesh the ranges are contiguous and tile the index
-buffer exactly, so a raycast hit maps back to a part id by range lookup, and
-selection/recolor is a `[start, count]` group per part. `asset.extras`
-carries `"web3dversion": 2` like rvm_parser_glb.
+Ids are a 1-based counter assigned depth-first over the expanded assembly (not
+STEP entity ids): the first node is `1` and they increment, so a part instanced
+five times gets five ids and five draw ranges. There is **one id per draw
+call**: a part's first color reuses the part's id, and each further color of
+the same part is added to `id_hierarchy` as its own numbered child node (same
+name, so the tree will show repeated names for multi-color parts). Each id
+therefore appears in exactly one `draw_ranges_node<N>` — never shared across
+color meshes — so selecting a draw call is a single id lookup. Within each
+merged mesh the ranges are contiguous and tile the index buffer exactly, so a
+raycast hit maps back to an id by range lookup, and selection/recolor is a
+`[start, count]` group per id. `asset.extras` carries `"web3dversion": 2` like
+rvm_parser_glb.
 
 Per-part mesh optimization still runs before merging (ranges stay valid;
 merged meshes are never reordered afterwards), and unit scaling to meters

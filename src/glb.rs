@@ -230,6 +230,12 @@ fn pack_glb(json: String, bin: Vec<u8>) -> Vec<u8> {
 /// Nodes are named `node<N>` and reference mesh `N` / material `N`, so the
 /// `draw_ranges_node<N>` key is resolvable from the node name. Ranges are
 /// offsets into that mesh's index accessor (element counts, not bytes).
+///
+/// One id per draw call: a part's first color reuses the part's id, and each
+/// further color of the same part is added to `id_hierarchy` as its own
+/// numbered child node. So every id appears in exactly one `draw_ranges_node`
+/// (never shared across color meshes), and a part that spans several colors is
+/// the set of its own id plus those child ids.
 #[derive(Default)]
 pub struct MergedBuilder {
     buckets: Vec<MergedBucket>,
@@ -249,39 +255,38 @@ impl MergedBuilder {
         self.hierarchy.push((id, name.to_string(), parent));
     }
 
-    /// Append one part's world-space geometry: each color bucket of the set
-    /// merges into the matching color mesh and gets one draw range under the
-    /// part's id.
-    pub fn add_part(&mut self, id: u32, set: &MeshSet) {
-        for (color, m) in &set.parts {
-            if m.is_empty() {
-                continue;
-            }
-            let key = color.map(quantize_color);
-            let bi = self
-                .buckets
-                .iter()
-                .position(|b| b.color.map(quantize_color) == key)
-                .unwrap_or_else(|| {
-                    self.buckets.push(MergedBucket {
-                        color: *color,
-                        mesh: TriMesh::default(),
-                        ranges: Vec::new(),
-                    });
-                    self.buckets.len() - 1
-                });
-            let b = &mut self.buckets[bi];
-            let start = b.mesh.indices.len() as u32;
-            b.mesh.append(m);
-            b.ranges.push((id, start, m.indices.len() as u32));
+    /// Append one draw call: a single color slice of a part, merged into its
+    /// color mesh under `id`. Each `id` lands in exactly one color mesh — the
+    /// caller mints a fresh id per color slice (see [`crate::merge`]), so a
+    /// draw-range id is never shared across color meshes.
+    pub fn add_bucket(&mut self, id: u32, color: Option<[f32; 4]>, m: &TriMesh) {
+        if m.is_empty() {
+            return;
         }
+        let key = color.map(quantize_color);
+        let bi = self
+            .buckets
+            .iter()
+            .position(|b| b.color.map(quantize_color) == key)
+            .unwrap_or_else(|| {
+                self.buckets.push(MergedBucket {
+                    color,
+                    mesh: TriMesh::default(),
+                    ranges: Vec::new(),
+                });
+                self.buckets.len() - 1
+            });
+        let b = &mut self.buckets[bi];
+        let start = b.mesh.indices.len() as u32;
+        b.mesh.append(m);
+        b.ranges.push((id, start, m.indices.len() as u32));
     }
 
     pub fn bucket_count(&self) -> usize {
         self.buckets.len()
     }
 
-    /// Distinct part ids that own geometry (a part may span several colors).
+    /// Distinct draw-call ids that own geometry (one per part color slice).
     pub fn part_count(&self) -> usize {
         let mut ids = std::collections::HashSet::new();
         for b in &self.buckets {
@@ -638,24 +643,24 @@ mod tests {
     }
 
     #[test]
-    fn merged_builder_draw_ranges_and_id_hierarchy() {
+    fn merged_builder_one_id_per_drawcall_and_id_hierarchy() {
         let mut mb = MergedBuilder::default();
         mb.add_hierarchy(1, "root", 0);
+        // element "a" (id 2): red slice keeps id 2; its uncolored slice is its
+        // own numbered child node (id 4)
         mb.add_hierarchy(2, "a", 1);
+        mb.add_bucket(2, Some([1.0, 0.0, 0.0, 1.0]), &tri_mesh());
+        mb.add_hierarchy(4, "a", 2);
+        mb.add_bucket(4, None, &tri_mesh());
+        // element "b" (id 3): red slice keeps id 3; its translucent green slice
+        // is its own numbered child node (id 5)
         mb.add_hierarchy(3, "b", 1);
+        mb.add_bucket(3, Some([1.0, 0.0, 0.0, 1.0]), &tri_mesh());
+        mb.add_hierarchy(5, "b", 3);
+        mb.add_bucket(5, Some([0.0, 1.0, 0.0, 0.5]), &tri_mesh());
 
-        // part 2: red + uncolored geometry; part 3: red + translucent green
-        let mut set_a = MeshSet::default();
-        set_a.bucket(Some([1.0, 0.0, 0.0, 1.0])).append(&tri_mesh());
-        set_a.bucket(None).append(&tri_mesh());
-        mb.add_part(2, &set_a);
-        let mut set_b = MeshSet::default();
-        set_b.bucket(Some([1.0, 0.0, 0.0, 1.0])).append(&tri_mesh());
-        set_b.bucket(Some([0.0, 1.0, 0.0, 0.5])).append(&tri_mesh());
-        mb.add_part(3, &set_b);
-
-        assert_eq!(mb.bucket_count(), 3);
-        assert_eq!(mb.part_count(), 2);
+        assert_eq!(mb.bucket_count(), 3, "red, uncolored, green");
+        assert_eq!(mb.part_count(), 4, "four draw calls -> four ids");
 
         let g = mb.write("test");
         let jlen = u32::from_le_bytes(g[12..16].try_into().unwrap()) as usize;
@@ -678,19 +683,28 @@ mod tests {
         assert!(json["materials"][0].get("alphaMode").is_none());
         assert_eq!(json["materials"][2]["alphaMode"], "BLEND");
 
-        // ranges are index offsets into the per-color merged mesh
+        // every draw call is one id in exactly one color mesh (never shared)
         let extras = &json["scenes"][0]["extras"];
-        assert_eq!(extras["draw_ranges_node0"]["2"][0], 0);
-        assert_eq!(extras["draw_ranges_node0"]["2"][1], 3);
-        assert_eq!(extras["draw_ranges_node0"]["3"][0], 3);
-        assert_eq!(extras["draw_ranges_node0"]["3"][1], 3);
-        assert_eq!(extras["draw_ranges_node1"]["2"][0], 0);
-        assert!(extras["draw_ranges_node1"].get("3").is_none());
+        assert_eq!(extras["draw_ranges_node0"]["2"], serde_json::json!([0, 3]));
+        assert_eq!(extras["draw_ranges_node0"]["3"], serde_json::json!([3, 3]));
+        assert_eq!(extras["draw_ranges_node1"]["4"], serde_json::json!([0, 3]));
+        assert_eq!(extras["draw_ranges_node2"]["5"], serde_json::json!([0, 3]));
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..3 {
+            for k in extras[&format!("draw_ranges_node{}", i)]
+                .as_object()
+                .unwrap()
+                .keys()
+            {
+                assert!(seen.insert(k.clone()), "id {k} appears in >1 mesh");
+            }
+        }
 
-        // id_hierarchy: [name, parent id], "*" marks the root
-        assert_eq!(extras["id_hierarchy"]["1"][0], "root");
-        assert_eq!(extras["id_hierarchy"]["1"][1], "*");
-        assert_eq!(extras["id_hierarchy"]["2"][1], "1");
+        // id_hierarchy: [name, parent]; the extra-color slices are child nodes
+        assert_eq!(extras["id_hierarchy"]["1"], serde_json::json!(["root", "*"]));
+        assert_eq!(extras["id_hierarchy"]["2"], serde_json::json!(["a", "1"]));
+        assert_eq!(extras["id_hierarchy"]["4"], serde_json::json!(["a", "2"]));
+        assert_eq!(extras["id_hierarchy"]["5"], serde_json::json!(["b", "3"]));
 
         assert_eq!(json["asset"]["extras"]["web3dversion"], 2);
     }

@@ -95,8 +95,10 @@ pub fn build(
         prepare(&mut tm, &opts);
         if !tm.is_empty() {
             tm.transform(&base);
-            w.out.add_hierarchy(1, "geometry", 0);
-            w.out.add_part(1, &tm);
+            let id = w.next_id;
+            w.next_id += 1;
+            w.out.add_hierarchy(id, "geometry", 0);
+            w.emit_set(id, "geometry", &tm);
             return (w.out, 1);
         }
     }
@@ -146,12 +148,36 @@ impl Walk<'_, '_> {
         self.out.add_hierarchy(id, name, parent);
         if let Some(mut set) = self.pd_mesh(pd) {
             set.transform(&world);
-            self.out.add_part(id, &set);
+            self.emit_set(id, name, &set);
         }
         if let Some(kids) = self.asm.children.get(&pd) {
             for k in kids {
                 self.rec(k.child_pd, &k.name, id, world.mul(k.transform), depth + 1);
             }
+        }
+    }
+
+    /// Emit one draw call per non-empty color slice of `set`. The first color
+    /// reuses the element's `id`; every further color of the same element is
+    /// added as its own numbered child node (same name, parented under `id`),
+    /// so each draw-range id lands in exactly one color mesh and is never
+    /// shared across colors.
+    fn emit_set(&mut self, id: u32, name: &str, set: &MeshSet) {
+        let mut first = true;
+        for (color, mesh) in &set.parts {
+            if mesh.is_empty() {
+                continue;
+            }
+            let did = if first {
+                first = false;
+                id
+            } else {
+                let c = self.next_id;
+                self.next_id += 1;
+                self.out.add_hierarchy(c, name, id);
+                c
+            };
+            self.out.add_bucket(did, *color, mesh);
         }
     }
 
