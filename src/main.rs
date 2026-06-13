@@ -107,6 +107,15 @@ struct Args {
     /// model to glTF's Y-up; "y" exports the axes unchanged
     #[arg(long, value_enum, default_value_t = UpAxis::Z)]
     up_axis: UpAxis,
+
+    /// Debug: restrict output to the element(s) matching this query plus their
+    /// whole subtree — to isolate why an element is missing or wrong. Matches a
+    /// PRODUCT_DEFINITION id as `#<n>`/`<n>`, else a case-insensitive substring
+    /// of the product name. With --tree prints just that subtree; with
+    /// --debug-print also writes <input>.filter.step (the element + the
+    /// transitive closure of everything it references, re-runnable)
+    #[arg(long)]
+    filter: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
@@ -168,7 +177,54 @@ fn main() {
         print_entity_stats(&sf);
     }
 
-    let asm = hierarchy::build(&sf);
+    let mut asm = hierarchy::build(&sf);
+    if let Some(query) = &args.filter {
+        let roots = hierarchy::filter_roots(&asm, query);
+        if roots.is_empty() {
+            eprintln!("error: --filter {:?} matched no product", query);
+            std::process::exit(2);
+        }
+        eprintln!("filter {:?} -> {} subtree root(s):", query, roots.len());
+        for &pd in &roots {
+            let node = asm.products.get(&pd);
+            let name = node.map(|n| n.name.as_str()).unwrap_or("?");
+            let reps = node.map(|n| n.shape_reps.len()).unwrap_or(0);
+            let kids = asm.children.get(&pd).map(|k| k.len()).unwrap_or(0);
+            eprintln!(
+                "  #{pd} {name}  ({reps} shape rep(s), {kids} child instance(s){})",
+                if reps == 0 { ", no geometry of its own" } else { "" }
+            );
+        }
+        asm.roots = roots;
+        if args.debug_print {
+            let ids = hierarchy::subtree_entities(&sf, &asm, &asm.roots);
+            write_filter_excerpt(&sf, &ids, &args.input.with_extension("filter.step"));
+        }
+    }
+
+    // Heads-up: parts that are in the tree but have no geometry attached often
+    // mean a representation linkage we didn't follow, not an empty part.
+    let missing = hierarchy::parts_missing_geometry(&asm);
+    if !missing.is_empty() {
+        eprintln!(
+            "warn: {} leaf part(s) in the tree have no geometry attached \
+             (possible unfollowed representation linkage); e.g.:",
+            missing.len()
+        );
+        for &pd in missing.iter().take(8) {
+            let name: String = asm
+                .products
+                .get(&pd)
+                .map(|n| n.name.replace(['\n', '\r', '\t'], " "))
+                .unwrap_or_else(|| "?".into())
+                .chars()
+                .take(70)
+                .collect();
+            eprintln!("        #{pd} {name}");
+        }
+        eprintln!("        (isolate one with --filter \"<name>\" or --filter \"#<id>\")");
+    }
+
     if args.tree {
         if asm.roots.is_empty() {
             println!("(no product hierarchy found)");
@@ -588,6 +644,9 @@ fn print_settings(args: &Args, threads: usize, file_unit_scale: f64) {
             args.input.with_extension("debug.txt").display()
         );
     }
+    if let Some(q) = &args.filter {
+        eprintln!("  filter            {q:?} (isolate matching subtree)");
+    }
 }
 
 fn simplify_threshold(args: &Args) -> f32 {
@@ -658,6 +717,50 @@ fn report_unsupported(stats: &TessStats) {
             }
         }
         eprintln!("  (run with --debug-print to dump these faces as a shareable .step)");
+    }
+}
+
+/// `--filter --debug-print`: write a self-contained, re-runnable STEP excerpt of
+/// the matched subtree — its product structure, shape/representation linkage and
+/// geometry (see [`hierarchy::subtree_entities`]) — so a missing or wrong
+/// element can be inspected or shared in isolation.
+fn write_filter_excerpt(sf: &StepFile, ids: &[u32], path: &std::path::Path) {
+    let mut out = String::from("ISO-10303-21;\n");
+    out.push_str(
+        "/* step2glb --filter --debug-print: a matched element plus the transitive\n\
+        \x20  closure of everything it references — product structure, shape and\n\
+        \x20  representation linkage (relationships followed multi-hop), geometry.\n\
+        \x20  Rename to .step to re-run, or read it to see how geometry is (or is\n\
+        \x20  not) attached. */\n",
+    );
+    let (h0, h1) = sf.header_range;
+    if h1 > h0 && h1 <= sf.data.len() {
+        out.push_str(&String::from_utf8_lossy(&sf.data[h0..h1]));
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    } else {
+        out.push_str("HEADER;\nENDSEC;\n");
+    }
+    out.push_str("DATA;\n");
+    for &id in ids {
+        if let Some(line) = sf.entity_source(id) {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    out.push_str("ENDSEC;\nEND-ISO-10303-21;\n");
+    match std::fs::write(path, out) {
+        Ok(()) => eprintln!(
+            "--filter --debug-print: wrote {} entities to {}",
+            ids.len(),
+            path.display()
+        ),
+        Err(e) => eprintln!(
+            "--filter --debug-print: cannot write {}: {}",
+            path.display(),
+            e
+        ),
     }
 }
 

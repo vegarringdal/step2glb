@@ -105,6 +105,17 @@ step2glb model.step --cleanup-position
 # just print the assembly tree
 step2glb model.step --tree
 
+# isolate one element + its whole subtree (debug a missing/wrong part): match
+# a product name (case-insensitive substring) or a PRODUCT_DEFINITION id (#<n>).
+# Combine with --tree to see which nodes carry [geometry], or convert just that
+# subtree to a small GLB.
+step2glb model.step --filter "Housing" --tree
+step2glb model.step --filter "#584388" -o part.glb
+# extract that element + the transitive closure of everything it references to
+# <input>.filter.step (re-runnable) — representation relationships are followed
+# multi-hop, so a geometry link the converter misses still shows up to debug
+step2glb model.step --filter "#584388" --debug-print
+
 # entity statistics (top types by count) + conversion
 step2glb model.step --stats
 
@@ -400,7 +411,13 @@ cargo test
       faster and more robust near surface seams.
 - [ ] Multi-winding periodic loops (|w| > 1) and polar caps on general
       surfaces of revolution are skipped.
-- [ ] Transparency (`SURFACE_STYLE_TRANSPARENT`) and per-vertex colors.
+- [x] ~~Transparency (`SURFACE_STYLE_TRANSPARENT`)~~: the styled-item walk reads
+      the transparency factor as a sibling of the fill-area colour and folds it
+      into the material alpha (alpha = 1 − transparency, ISO 10303-46); the
+      writer already emits `alphaMode: BLEND` for alpha < 1.
+- [ ] Per-vertex colors. STEP B-rep colour is per-face / per-item (handled);
+      only AP242 tessellated sets can carry vertex colours, and the writer has
+      no `COLOR_0` attribute yet.
 - [ ] Optional `EXT_mesh_gpu_instancing` instead of node-per-instance for
       huge assemblies, and meshopt simplification LODs (`--simplify`).
 - [ ] Streaming/chunked index for files that don't fit in RAM (current
@@ -408,7 +425,15 @@ cargo test
 - [x] ~~Parallel tessellation~~: `-t/--threads` fans faces out over scoped
       std threads (no new dependency), default auto = CPU cores capped at 4.
       Results merge in face order, so output is byte-identical to serial.
-- [ ] `--filter`/`--subtree` to export only part of the hierarchy.
+- [x] ~~`--filter`/`--subtree` to export only part of the hierarchy~~:
+      `--filter <name|#id>` isolates a matching element plus its whole subtree
+      (substring on product name, or exact `PRODUCT_DEFINITION` id) — handy for
+      debugging why a part is missing or misplaced. With `--debug-print` it also
+      writes `<input>.filter.step`, a re-runnable excerpt of that element and the
+      transitive closure of everything it references (representation
+      relationships followed multi-hop, so an unfollowed geometry link still
+      appears). Runs also warn about leaf parts in the tree that carry no
+      geometry — the usual sign of such a link.
 
 ## Note on the bundled `Cargo.lock`
 

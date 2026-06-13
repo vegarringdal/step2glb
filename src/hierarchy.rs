@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::geom::M4;
 use crate::model;
-use crate::step::{StepFile, P};
+use crate::step::{StepFile, P, TYPE_COMPLEX};
 
 pub struct ProductNode {
     pub pd: u32,
@@ -299,6 +299,232 @@ fn product_name(sf: &StepFile, pd: u32) -> Option<String> {
         .or_else(|| pr.first().and_then(|v| v.as_str()).map(|s| s.to_string()))
 }
 
+/// Resolve a `--filter` query to subtree-root product-definition ids: `#<n>`
+/// or `<n>` matches a PRODUCT_DEFINITION entity id exactly, otherwise it is a
+/// case-insensitive substring match on product names. A match that lies in
+/// another match's subtree is dropped so a subtree isn't emitted twice.
+/// Returns the matched roots (sorted); empty if nothing matched.
+pub fn filter_roots(asm: &Assembly, query: &str) -> Vec<u32> {
+    let q = query.trim();
+    if let Ok(id) = q.strip_prefix('#').unwrap_or(q).parse::<u32>() {
+        if asm.products.contains_key(&id) {
+            return vec![id];
+        }
+    }
+    let ql = q.to_lowercase();
+    let mut hits: Vec<u32> = asm
+        .products
+        .iter()
+        .filter(|(_, n)| n.name.to_lowercase().contains(&ql))
+        .map(|(&pd, _)| pd)
+        .collect();
+    hits.sort_unstable();
+    let set: HashSet<u32> = hits.iter().copied().collect();
+    hits.retain(|&pd| !set.iter().any(|&a| a != pd && subtree_contains(asm, a, pd, 0)));
+    hits
+}
+
+/// Reachable leaf product-definitions (no child instances) that have no shape
+/// representation attached — i.e. parts that show up in the tree but carry no
+/// geometry. A strong hint of a geometry linkage we don't follow (a multi-hop
+/// representation relationship, a sibling PD of the same product holding the
+/// shape, a plain `REPRESENTATION_RELATIONSHIP`, ...). Distinct PDs, sorted.
+pub fn parts_missing_geometry(asm: &Assembly) -> Vec<u32> {
+    fn walk(asm: &Assembly, pd: u32, depth: usize, seen: &mut HashSet<u32>, out: &mut Vec<u32>) {
+        if depth > 64 || !seen.insert(pd) {
+            return;
+        }
+        let kids = asm.children.get(&pd);
+        let is_leaf = kids.map(|k| k.is_empty()).unwrap_or(true);
+        let has_shape = asm
+            .products
+            .get(&pd)
+            .map(|n| !n.shape_reps.is_empty())
+            .unwrap_or(false);
+        if is_leaf && !has_shape {
+            out.push(pd);
+        }
+        if let Some(kids) = kids {
+            for k in kids {
+                walk(asm, k.child_pd, depth + 1, seen, out);
+            }
+        }
+    }
+    let (mut out, mut seen) = (Vec::new(), HashSet::new());
+    for &r in &asm.roots {
+        walk(asm, r, 0, &mut seen, &mut out);
+    }
+    out.sort_unstable();
+    out
+}
+
+/// Whether `target` lies in the assembly subtree rooted at `root`.
+fn subtree_contains(asm: &Assembly, root: u32, target: u32, depth: usize) -> bool {
+    if depth > 64 {
+        return false;
+    }
+    asm.children.get(&root).is_some_and(|kids| {
+        kids.iter()
+            .any(|k| k.child_pd == target || subtree_contains(asm, k.child_pd, target, depth + 1))
+    })
+}
+
+/// PRODUCT entity behind a PRODUCT_DEFINITION (PD -> PDF -> PRODUCT).
+fn product_of(sf: &StepFile, pd: u32) -> Option<u32> {
+    let pdf = sf.params(pd)?.get(2).and_then(|v| v.as_ref_id())?;
+    sf.params(pdf)?.get(2).and_then(|v| v.as_ref_id())
+}
+
+/// Collect the STEP entity ids that define the subtree rooted at `roots`, for a
+/// self-contained `--filter --debug-print` excerpt. Gathers the
+/// product-definition closure, the assembly edges (NAUO) and their transforms,
+/// and the shape/representation linkage — **following representation
+/// relationships transitively**, including plain `REPRESENTATION_RELATIONSHIP`,
+/// complex `..._WITH_TRANSFORMATION` and multi-hop chains the converter does
+/// not normally traverse, plus sibling product-definitions of the same product.
+/// So a geometry link the converter currently misses still appears in the
+/// excerpt — which is exactly what makes "why is this empty?" debuggable.
+/// Returns deduped, sorted entity ids.
+pub fn subtree_entities(sf: &StepFile, asm: &Assembly, roots: &[u32]) -> Vec<u32> {
+    const CAP: usize = 400_000;
+
+    // 1) subtree product-definitions
+    fn collect(asm: &Assembly, pd: u32, d: usize, out: &mut HashSet<u32>) {
+        if d > 64 || !out.insert(pd) {
+            return;
+        }
+        if let Some(kids) = asm.children.get(&pd) {
+            for k in kids {
+                collect(asm, k.child_pd, d + 1, out);
+            }
+        }
+    }
+    let mut pds: HashSet<u32> = HashSet::new();
+    for &r in roots {
+        collect(asm, r, 0, &mut pds);
+    }
+
+    // 1b) sibling PDs sharing a product (exposes geometry attached to another
+    // definition of the same product)
+    let products: HashSet<u32> = pds.iter().filter_map(|&pd| product_of(sf, pd)).collect();
+    let mut interesting: HashSet<u32> = pds.clone();
+    if !products.is_empty() {
+        for &pd in asm.products.keys() {
+            if product_of(sf, pd).is_some_and(|pr| products.contains(&pr)) {
+                interesting.insert(pd);
+            }
+        }
+    }
+
+    let mut keep: HashSet<u32> = interesting.clone();
+
+    // 2) NAUO edges touching the subtree
+    let mut nauos: HashSet<u32> = HashSet::new();
+    for &n in sf.of_type("NEXT_ASSEMBLY_USAGE_OCCURRENCE") {
+        let (a, b) = nauo_pds(sf, n);
+        if a.is_some_and(|x| pds.contains(&x)) || b.is_some_and(|x| pds.contains(&x)) {
+            nauos.insert(n);
+            keep.insert(n);
+        }
+    }
+
+    // 3) PRODUCT_DEFINITION_SHAPE for those PDs / NAUOs
+    let mut pdss: HashSet<u32> = HashSet::new();
+    for &p in sf.of_type("PRODUCT_DEFINITION_SHAPE") {
+        if let Some(def) = sf.params(p).and_then(|q| q.get(2).and_then(|v| v.as_ref_id())) {
+            if interesting.contains(&def) || nauos.contains(&def) {
+                pdss.insert(p);
+                keep.insert(p);
+            }
+        }
+    }
+
+    // 4) representations: from shape_reps and from SDRs of those PDS
+    let mut reps: HashSet<u32> = HashSet::new();
+    for &pd in &interesting {
+        if let Some(node) = asm.products.get(&pd) {
+            reps.extend(node.shape_reps.iter().copied());
+        }
+    }
+    for &sdr in sf.of_type("SHAPE_DEFINITION_REPRESENTATION") {
+        if let Some(p) = sf.params(sdr) {
+            if p.first().and_then(|v| v.as_ref_id()).is_some_and(|d| pdss.contains(&d)) {
+                keep.insert(sdr);
+                if let Some(sr) = p.get(1).and_then(|v| v.as_ref_id()) {
+                    reps.insert(sr);
+                }
+            }
+        }
+    }
+
+    // 5) CONTEXT_DEPENDENT_SHAPE_REPRESENTATION (per-instance transforms)
+    for &cdsr in sf.of_type("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION") {
+        if let Some(p) = sf.params(cdsr) {
+            if p.get(1).and_then(|v| v.as_ref_id()).is_some_and(|x| pdss.contains(&x)) {
+                keep.insert(cdsr);
+                if let Some(rel) = p.first().and_then(|v| v.as_ref_id()) {
+                    keep.insert(rel);
+                }
+            }
+        }
+    }
+
+    // 6) representation-relationship closure over `reps` (multi-hop; plain,
+    // shape and complex with-transformation forms)
+    let mut rels: Vec<u32> = Vec::new();
+    for ty in [
+        "SHAPE_REPRESENTATION_RELATIONSHIP",
+        "REPRESENTATION_RELATIONSHIP",
+        "REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION",
+    ] {
+        rels.extend(sf.of_type(ty).iter().copied());
+    }
+    if let Some(cty) = sf.type_id(TYPE_COMPLEX) {
+        if let Some(ids) = sf.by_type.get(&cty) {
+            for &id in ids {
+                if sf.complex_leaf(id, "REPRESENTATION_RELATIONSHIP").is_some() {
+                    rels.push(id);
+                }
+            }
+        }
+    }
+    let is_rep = |id: u32| {
+        sf.entity_type(id).is_some_and(|t| {
+            t.contains("REPRESENTATION") && !t.contains("RELATIONSHIP") && !t.contains("DEFINITION")
+        })
+    };
+    let rel_refs: Vec<(u32, Vec<u32>)> = rels
+        .iter()
+        .map(|&r| (r, sf.entity_refs(r).into_iter().filter(|&x| is_rep(x)).collect()))
+        .collect();
+    loop {
+        let before = reps.len();
+        for (rel, refs) in &rel_refs {
+            if refs.iter().any(|r| reps.contains(r)) {
+                keep.insert(*rel);
+                reps.extend(refs.iter().copied());
+            }
+        }
+        if reps.len() == before {
+            break;
+        }
+    }
+    keep.extend(reps.iter().copied());
+
+    // 7) forward subgraph of everything kept (geometry, contexts, transforms,
+    // product chains), capped against runaway
+    let mut out: HashSet<u32> = HashSet::new();
+    for &id in &keep {
+        if out.len() > CAP {
+            break;
+        }
+        out.extend(sf.subgraph(id, CAP));
+    }
+    let mut v: Vec<u32> = out.into_iter().collect();
+    v.sort_unstable();
+    v
+}
+
 /// Pretty-print the assembly tree to stdout.
 pub fn print_tree(asm: &Assembly) {
     fn rec(asm: &Assembly, pd: u32, name: &str, prefix: &str, last: bool, depth: usize) {
@@ -344,5 +570,54 @@ pub fn print_tree(asm: &Assembly) {
             .map(|n| n.name.clone())
             .unwrap_or_else(|| format!("PD#{}", r));
         rec(asm, r, &name, "", true, 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(pd: u32, name: &str, shape_reps: Vec<u32>) -> ProductNode {
+        ProductNode {
+            pd,
+            name: name.into(),
+            shape_reps,
+        }
+    }
+    fn inst(child_pd: u32, name: &str) -> Instance {
+        Instance {
+            nauo: 0,
+            child_pd,
+            name: name.into(),
+            transform: M4::IDENTITY,
+        }
+    }
+
+    #[test]
+    fn parts_missing_geometry_flags_geometryless_leaves() {
+        let mut asm = Assembly::default();
+        asm.products.insert(1, node(1, "root", vec![])); // container, no shape
+        asm.products.insert(2, node(2, "withgeo", vec![100])); // leaf w/ shape
+        asm.products.insert(3, node(3, "nogeo", vec![])); // leaf w/o shape
+        asm.children
+            .insert(1, vec![inst(2, "withgeo"), inst(3, "nogeo")]);
+        asm.roots = vec![1];
+        // root has children -> not a leaf, not flagged; leaf 2 has a shape; only
+        // leaf 3 (in the tree, no geometry) is flagged
+        assert_eq!(parts_missing_geometry(&asm), vec![3]);
+    }
+
+    #[test]
+    fn filter_roots_dedupes_descendants_and_matches_id() {
+        let mut asm = Assembly::default();
+        asm.products.insert(1, node(1, "Alpha", vec![]));
+        asm.products.insert(2, node(2, "Alpha child", vec![100]));
+        asm.children.insert(1, vec![inst(2, "Alpha child")]);
+        asm.roots = vec![1];
+        // "alpha" matches #1 and #2, but #2 is inside #1's subtree -> dropped
+        assert_eq!(filter_roots(&asm, "alpha"), vec![1]);
+        // explicit id still selects the descendant directly
+        assert_eq!(filter_roots(&asm, "#2"), vec![2]);
+        assert!(filter_roots(&asm, "nope").is_empty());
     }
 }

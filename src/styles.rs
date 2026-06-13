@@ -46,29 +46,41 @@ pub fn build_color_map(sf: &StepFile) -> ColorMap {
     map
 }
 
-/// BFS through entity references until a COLOUR_RGB or pre-defined colour
-/// name is reached.
+/// BFS through the style reference graph collecting the first colour
+/// (`COLOUR_RGB` or a pre-defined colour name) and the first transparency
+/// (`SURFACE_STYLE_TRANSPARENT`, a sibling of the fill-area style). Alpha =
+/// 1 − transparency (ISO 10303-46: 0 = opaque, 1 = fully transparent). Returns
+/// `None` if no colour is found (an item with only a transparency keeps the
+/// default material).
 fn find_color(sf: &StepFile, roots: &[u32]) -> Option<[f32; 4]> {
     let mut queue: VecDeque<(u32, usize)> = roots.iter().map(|&r| (r, 0)).collect();
     let mut seen: HashSet<u32> = roots.iter().copied().collect();
+    let mut rgb: Option<[f32; 3]> = None;
+    let mut transparency: Option<f32> = None;
     while let Some((id, depth)) = queue.pop_front() {
         if depth > 10 {
             continue;
         }
         match sf.entity_type(id) {
-            Some("COLOUR_RGB") => {
-                let p = sf.params(id)?;
-                let nums: Vec<f64> = p.iter().filter_map(|v| v.as_f64()).collect();
-                if nums.len() >= 3 {
-                    return Some([nums[0] as f32, nums[1] as f32, nums[2] as f32, 1.0]);
+            Some("COLOUR_RGB") if rgb.is_none() => {
+                if let Some(p) = sf.params(id) {
+                    let nums: Vec<f64> = p.iter().filter_map(|v| v.as_f64()).collect();
+                    if nums.len() >= 3 {
+                        rgb = Some([nums[0] as f32, nums[1] as f32, nums[2] as f32]);
+                    }
                 }
             }
-            Some("DRAUGHTING_PRE_DEFINED_COLOUR") | Some("PRE_DEFINED_COLOUR") => {
-                let p = sf.params(id)?;
-                if let Some(name) = p.iter().find_map(|v| v.as_str()) {
-                    if let Some(c) = named_color(name) {
-                        return Some(c);
-                    }
+            Some("DRAUGHTING_PRE_DEFINED_COLOUR" | "PRE_DEFINED_COLOUR") if rgb.is_none() => {
+                if let Some(c) = sf
+                    .params(id)
+                    .and_then(|p| p.iter().find_map(|v| v.as_str()).and_then(named_color))
+                {
+                    rgb = Some([c[0], c[1], c[2]]);
+                }
+            }
+            Some("SURFACE_STYLE_TRANSPARENT") if transparency.is_none() => {
+                if let Some(t) = sf.params(id).and_then(|p| p.iter().find_map(|v| v.as_f64())) {
+                    transparency = Some(t as f32);
                 }
             }
             Some(_) => {
@@ -78,8 +90,13 @@ fn find_color(sf: &StepFile, roots: &[u32]) -> Option<[f32; 4]> {
             }
             None => {}
         }
+        if rgb.is_some() && transparency.is_some() {
+            break;
+        }
     }
-    None
+    let rgb = rgb?;
+    let alpha = transparency.map_or(1.0, |t| (1.0 - t).clamp(0.0, 1.0));
+    Some([rgb[0], rgb[1], rgb[2], alpha])
 }
 
 fn enqueue_refs(
@@ -158,6 +175,34 @@ ENDSEC;";
         let map = build_color_map(&sf);
         let c = map.get(&10).expect("face #10 colored");
         assert_eq!(*c, [0.0, 1.0, 0.0, 1.0]); // 'green'
+    }
+
+    const TRANSPARENT: &str = "DATA;
+#1=MANIFOLD_SOLID_BREP('part',#99);
+#2=COLOUR_RGB('',0.2,0.4,0.6);
+#3=FILL_AREA_STYLE_COLOUR('',#2);
+#4=FILL_AREA_STYLE('',(#3));
+#5=SURFACE_STYLE_FILL_AREA(#4);
+#6=SURFACE_STYLE_TRANSPARENT(0.25);
+#7=SURFACE_SIDE_STYLE('',(#5,#6));
+#8=SURFACE_STYLE_USAGE(.BOTH.,#7);
+#9=PRESENTATION_STYLE_ASSIGNMENT((#8));
+#10=STYLED_ITEM('s',(#9),#1);
+ENDSEC;";
+
+    #[test]
+    fn surface_style_transparent_sets_alpha() {
+        let sf = parse(TRANSPARENT);
+        let c = *build_color_map(&sf).get(&1).expect("solid #1 colored");
+        assert!((c[0] - 0.2).abs() < 1e-6 && (c[1] - 0.4).abs() < 1e-6 && (c[2] - 0.6).abs() < 1e-6);
+        // alpha = 1 - 0.25
+        assert!((c[3] - 0.75).abs() < 1e-6, "alpha {} (expected 0.75)", c[3]);
+    }
+
+    #[test]
+    fn opaque_chain_keeps_alpha_one() {
+        let sf = parse(STYLED);
+        assert_eq!(build_color_map(&sf).get(&1).expect("colored")[3], 1.0);
     }
 
     #[test]

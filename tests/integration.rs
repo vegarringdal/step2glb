@@ -298,6 +298,51 @@ fn assembly_hierarchy_and_instance_transform() {
 }
 
 #[test]
+fn filter_roots_by_name_and_id() {
+    let sf = load("assembly.step");
+    let asm = hierarchy::build(&sf);
+
+    // case-insensitive substring on the product name
+    let by_name = hierarchy::filter_roots(&asm, "part_b");
+    assert_eq!(by_name.len(), 1, "PART_B matches once");
+    let pd = by_name[0];
+    assert_eq!(asm.products[&pd].name, "PART_B");
+
+    // explicit PRODUCT_DEFINITION id, with and without '#'
+    assert_eq!(hierarchy::filter_roots(&asm, &format!("#{pd}")), vec![pd]);
+    assert_eq!(hierarchy::filter_roots(&asm, &pd.to_string()), vec![pd]);
+
+    // filtering to the assembly root yields exactly the root set
+    assert_eq!(hierarchy::filter_roots(&asm, "ASM"), asm.roots);
+
+    // no match -> empty (caller turns this into an error)
+    assert!(hierarchy::filter_roots(&asm, "no-such-part").is_empty());
+}
+
+#[test]
+fn filter_subtree_entities_reach_geometry() {
+    let sf = load("assembly.step");
+    let asm = hierarchy::build(&sf);
+    let roots = hierarchy::filter_roots(&asm, "PART_B");
+    assert_eq!(roots.len(), 1);
+
+    let ids = hierarchy::subtree_entities(&sf, &asm, &roots);
+    assert!(ids.contains(&roots[0]), "excerpt includes the matched PD");
+    let ty = |pred: &dyn Fn(&str) -> bool| {
+        ids.iter()
+            .any(|&id| sf.entity_type(id).is_some_and(pred))
+    };
+    assert!(
+        ty(&|t| t.contains("SHAPE_REPRESENTATION")),
+        "closure must reach the shape representation"
+    );
+    assert!(
+        ty(&|t| t.contains("BREP")),
+        "closure must reach the brep geometry"
+    );
+}
+
+#[test]
 fn as1_real_world_assembly() {
     let sf = load("as1_pe_203.stp");
     let asm = hierarchy::build(&sf);
