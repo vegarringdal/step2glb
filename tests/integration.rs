@@ -340,6 +340,13 @@ fn filter_subtree_entities_reach_geometry() {
         ty(&|t| t.contains("BREP")),
         "closure must reach the brep geometry"
     );
+
+    // deterministic: the extraction must not depend on hash iteration order
+    assert_eq!(
+        ids,
+        hierarchy::subtree_entities(&sf, &asm, &roots),
+        "subtree_entities must be deterministic"
+    );
 }
 
 #[test]

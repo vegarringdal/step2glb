@@ -111,10 +111,11 @@ step2glb model.step --tree
 # subtree to a small GLB.
 step2glb model.step --filter "Housing" --tree
 step2glb model.step --filter "#584388" -o part.glb
-# extract that element + the transitive closure of everything it references to
-# <input>.filter.step (re-runnable) — representation relationships are followed
-# multi-hop, so a geometry link the converter misses still shows up to debug
-step2glb model.step --filter "#584388" --debug-print
+# extract that element + the transitive closure of everything it references to a
+# new standalone STEP file (re-runnable) — also pulls geometry linked one
+# relationship hop away or on a sibling definition, so an indirectly-attached
+# brep still shows up. Small enough to share for debugging.
+step2glb model.step --filter "#584388" --extract-step part.step
 
 # entity statistics (top types by count) + conversion
 step2glb model.step --stats
@@ -428,12 +429,12 @@ cargo test
 - [x] ~~`--filter`/`--subtree` to export only part of the hierarchy~~:
       `--filter <name|#id>` isolates a matching element plus its whole subtree
       (substring on product name, or exact `PRODUCT_DEFINITION` id) — handy for
-      debugging why a part is missing or misplaced. With `--debug-print` it also
-      writes `<input>.filter.step`, a re-runnable excerpt of that element and the
-      transitive closure of everything it references (representation
-      relationships followed multi-hop, so an unfollowed geometry link still
-      appears). Runs also warn about leaf parts in the tree that carry no
-      geometry — the usual sign of such a link.
+      debugging why a part is missing or misplaced. `--filter X --extract-step
+      <path>` writes a re-runnable standalone STEP file of that element and the
+      forward closure of everything it references — including geometry one
+      relationship hop away or on a sibling product-definition, so an
+      indirectly-attached brep still appears. Runs also warn about leaf parts in
+      the tree that carry no geometry — the usual sign of an unfollowed link.
 
 ## Note on the bundled `Cargo.lock`
 

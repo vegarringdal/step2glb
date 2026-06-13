@@ -376,18 +376,19 @@ fn product_of(sf: &StepFile, pd: u32) -> Option<u32> {
 }
 
 /// Collect the STEP entity ids that define the subtree rooted at `roots`, for a
-/// self-contained `--filter --debug-print` excerpt. Gathers the
-/// product-definition closure, the assembly edges (NAUO) and their transforms,
-/// and the shape/representation linkage — **following representation
-/// relationships transitively**, including plain `REPRESENTATION_RELATIONSHIP`,
-/// complex `..._WITH_TRANSFORMATION` and multi-hop chains the converter does
-/// not normally traverse, plus sibling product-definitions of the same product.
-/// So a geometry link the converter currently misses still appears in the
-/// excerpt — which is exactly what makes "why is this empty?" debuggable.
-/// Returns deduped, sorted entity ids.
+/// self-contained `--filter --extract-step` excerpt. Seeds the
+/// product-definition closure, the assembly edges (NAUO) and their per-instance
+/// transforms, and the shape/representation linkage (PDS, SDR, the resolved
+/// shape reps), then **broadens** to where the geometry can actually live but
+/// the converter may not look: sibling product-definitions of the same product,
+/// and the rep paired with one of our reps by a representation relationship
+/// (plain `REPRESENTATION_RELATIONSHIP`, complex `..._WITH_TRANSFORMATION`) —
+/// one hop, scoped to our reps, so a hub rep shared across the model can't drag
+/// the whole file in. Finally it takes the full forward closure of all of that
+/// in one shared traversal — so the brep is captured even when linked
+/// indirectly, and the excerpt is deterministic and complete (no cap-based
+/// truncation; the closure is naturally bounded by what the subtree reaches).
 pub fn subtree_entities(sf: &StepFile, asm: &Assembly, roots: &[u32]) -> Vec<u32> {
-    const CAP: usize = 400_000;
-
     // 1) subtree product-definitions
     fn collect(asm: &Assembly, pd: u32, d: usize, out: &mut HashSet<u32>) {
         if d > 64 || !out.insert(pd) {
@@ -404,10 +405,10 @@ pub fn subtree_entities(sf: &StepFile, asm: &Assembly, roots: &[u32]) -> Vec<u32
         collect(asm, r, 0, &mut pds);
     }
 
-    // 1b) sibling PDs sharing a product (exposes geometry attached to another
-    // definition of the same product)
+    // 1b) sibling PDs of the same product — geometry is sometimes attached to
+    // another definition of the product than the one the NAUO instances
     let products: HashSet<u32> = pds.iter().filter_map(|&pd| product_of(sf, pd)).collect();
-    let mut interesting: HashSet<u32> = pds.clone();
+    let mut interesting = pds.clone();
     if !products.is_empty() {
         for &pd in asm.products.keys() {
             if product_of(sf, pd).is_some_and(|pr| products.contains(&pr)) {
@@ -416,15 +417,22 @@ pub fn subtree_entities(sf: &StepFile, asm: &Assembly, roots: &[u32]) -> Vec<u32
         }
     }
 
-    let mut keep: HashSet<u32> = interesting.clone();
+    // seeds: PDs + their already-resolved shape reps (the converter's view)
+    let mut seeds: HashSet<u32> = interesting.clone();
+    let mut reps: HashSet<u32> = HashSet::new();
+    for &pd in &interesting {
+        if let Some(node) = asm.products.get(&pd) {
+            reps.extend(node.shape_reps.iter().copied());
+        }
+    }
 
-    // 2) NAUO edges touching the subtree
+    // 2) NAUO edges within the subtree
     let mut nauos: HashSet<u32> = HashSet::new();
     for &n in sf.of_type("NEXT_ASSEMBLY_USAGE_OCCURRENCE") {
         let (a, b) = nauo_pds(sf, n);
         if a.is_some_and(|x| pds.contains(&x)) || b.is_some_and(|x| pds.contains(&x)) {
             nauos.insert(n);
-            keep.insert(n);
+            seeds.insert(n);
         }
     }
 
@@ -434,22 +442,16 @@ pub fn subtree_entities(sf: &StepFile, asm: &Assembly, roots: &[u32]) -> Vec<u32
         if let Some(def) = sf.params(p).and_then(|q| q.get(2).and_then(|v| v.as_ref_id())) {
             if interesting.contains(&def) || nauos.contains(&def) {
                 pdss.insert(p);
-                keep.insert(p);
+                seeds.insert(p);
             }
         }
     }
 
-    // 4) representations: from shape_reps and from SDRs of those PDS
-    let mut reps: HashSet<u32> = HashSet::new();
-    for &pd in &interesting {
-        if let Some(node) = asm.products.get(&pd) {
-            reps.extend(node.shape_reps.iter().copied());
-        }
-    }
+    // 4) SHAPE_DEFINITION_REPRESENTATION linking those PDS to their SR
     for &sdr in sf.of_type("SHAPE_DEFINITION_REPRESENTATION") {
         if let Some(p) = sf.params(sdr) {
             if p.first().and_then(|v| v.as_ref_id()).is_some_and(|d| pdss.contains(&d)) {
-                keep.insert(sdr);
+                seeds.insert(sdr);
                 if let Some(sr) = p.get(1).and_then(|v| v.as_ref_id()) {
                     reps.insert(sr);
                 }
@@ -457,20 +459,22 @@ pub fn subtree_entities(sf: &StepFile, asm: &Assembly, roots: &[u32]) -> Vec<u32
         }
     }
 
-    // 5) CONTEXT_DEPENDENT_SHAPE_REPRESENTATION (per-instance transforms)
+    // 5) CONTEXT_DEPENDENT_SHAPE_REPRESENTATION (per-instance transforms) + rel
     for &cdsr in sf.of_type("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION") {
         if let Some(p) = sf.params(cdsr) {
             if p.get(1).and_then(|v| v.as_ref_id()).is_some_and(|x| pdss.contains(&x)) {
-                keep.insert(cdsr);
+                seeds.insert(cdsr);
                 if let Some(rel) = p.first().and_then(|v| v.as_ref_id()) {
-                    keep.insert(rel);
+                    seeds.insert(rel);
                 }
             }
         }
     }
 
-    // 6) representation-relationship closure over `reps` (multi-hop; plain,
-    // shape and complex with-transformation forms)
+    // 6) representation-relationship closure over `reps`, a few hops, to reach
+    // geometry linked by a relationship the converter does not traverse (2+-hop
+    // shape relationships, plain/complex REPRESENTATION_RELATIONSHIP). Bounded
+    // so a globally-linked rep graph can't drag in the whole model.
     let mut rels: Vec<u32> = Vec::new();
     for ty in [
         "SHAPE_REPRESENTATION_RELATIONSHIP",
@@ -497,30 +501,35 @@ pub fn subtree_entities(sf: &StepFile, asm: &Assembly, roots: &[u32]) -> Vec<u32
         .iter()
         .map(|&r| (r, sf.entity_refs(r).into_iter().filter(|&x| is_rep(x)).collect()))
         .collect();
-    loop {
-        let before = reps.len();
-        for (rel, refs) in &rel_refs {
-            if refs.iter().any(|r| reps.contains(r)) {
-                keep.insert(*rel);
-                reps.extend(refs.iter().copied());
+    // one hop, scoped to the element's own reps: pull the sibling rep (the
+    // brep, typically) that a relationship pairs with one of our reps, plus the
+    // relationship itself. We do NOT chase the newly-added reps further — a
+    // hub rep shared across the whole model would otherwise drag in everything.
+    let base_reps = reps.clone();
+    for (rel, refs) in &rel_refs {
+        if refs.iter().any(|r| base_reps.contains(r)) {
+            seeds.insert(*rel);
+            reps.extend(refs.iter().copied());
+        }
+    }
+    seeds.extend(reps);
+
+    // 7) full forward closure of every seed in one shared traversal (geometry,
+    // contexts, placements, product chains). One `seen` set, so cost is linear
+    // in the entities the subtree reaches — no per-seed re-walk, no cap.
+    let mut seen: HashSet<u32> = HashSet::new();
+    let mut stack: Vec<u32> = seeds.into_iter().collect();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        for r in sf.entity_refs(id) {
+            if !seen.contains(&r) {
+                stack.push(r);
             }
         }
-        if reps.len() == before {
-            break;
-        }
     }
-    keep.extend(reps.iter().copied());
-
-    // 7) forward subgraph of everything kept (geometry, contexts, transforms,
-    // product chains), capped against runaway
-    let mut out: HashSet<u32> = HashSet::new();
-    for &id in &keep {
-        if out.len() > CAP {
-            break;
-        }
-        out.extend(sf.subgraph(id, CAP));
-    }
-    let mut v: Vec<u32> = out.into_iter().collect();
+    let mut v: Vec<u32> = seen.into_iter().collect();
     v.sort_unstable();
     v
 }

@@ -111,11 +111,18 @@ struct Args {
     /// Debug: restrict output to the element(s) matching this query plus their
     /// whole subtree — to isolate why an element is missing or wrong. Matches a
     /// PRODUCT_DEFINITION id as `#<n>`/`<n>`, else a case-insensitive substring
-    /// of the product name. With --tree prints just that subtree; with
-    /// --debug-print also writes <input>.filter.step (the element + the
-    /// transitive closure of everything it references, re-runnable)
+    /// of the product name. With --tree prints just that subtree; pair with
+    /// --extract-step to dump it to a new STEP file
     #[arg(long)]
     filter: Option<String>,
+
+    /// Debug: write the --filter selection to a new standalone STEP file at
+    /// this path — the matched element plus the transitive closure of
+    /// everything it references (product structure, shape/representation
+    /// linkage followed multi-hop, geometry), re-runnable in isolation and
+    /// small enough to share. Requires --filter; no GLB is written
+    #[arg(long, value_name = "PATH")]
+    extract_step: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
@@ -196,10 +203,18 @@ fn main() {
             );
         }
         asm.roots = roots;
-        if args.debug_print {
-            let ids = hierarchy::subtree_entities(&sf, &asm, &asm.roots);
-            write_filter_excerpt(&sf, &ids, &args.input.with_extension("filter.step"));
+    }
+
+    // --extract-step: write the selected subtree to a standalone, re-runnable
+    // STEP file (requires --filter, so it's a focused excerpt to share/inspect).
+    if let Some(path) = &args.extract_step {
+        if args.filter.is_none() {
+            eprintln!("error: --extract-step needs --filter to select what to extract");
+            std::process::exit(2);
         }
+        let ids = hierarchy::subtree_entities(&sf, &asm, &asm.roots);
+        write_step_excerpt(&sf, &ids, path);
+        return;
     }
 
     // Heads-up: parts that are in the tree but have no geometry attached often
@@ -647,6 +662,9 @@ fn print_settings(args: &Args, threads: usize, file_unit_scale: f64) {
     if let Some(q) = &args.filter {
         eprintln!("  filter            {q:?} (isolate matching subtree)");
     }
+    if let Some(p) = &args.extract_step {
+        eprintln!("  extract-step      {} (write subtree STEP, no GLB)", p.display());
+    }
 }
 
 fn simplify_threshold(args: &Args) -> f32 {
@@ -720,18 +738,17 @@ fn report_unsupported(stats: &TessStats) {
     }
 }
 
-/// `--filter --debug-print`: write a self-contained, re-runnable STEP excerpt of
-/// the matched subtree — its product structure, shape/representation linkage and
-/// geometry (see [`hierarchy::subtree_entities`]) — so a missing or wrong
+/// `--filter --extract-step`: write a self-contained, re-runnable STEP excerpt
+/// of the matched subtree — its product structure, shape/representation linkage
+/// and geometry (see [`hierarchy::subtree_entities`]) — so a missing or wrong
 /// element can be inspected or shared in isolation.
-fn write_filter_excerpt(sf: &StepFile, ids: &[u32], path: &std::path::Path) {
+fn write_step_excerpt(sf: &StepFile, ids: &[u32], path: &std::path::Path) {
     let mut out = String::from("ISO-10303-21;\n");
     out.push_str(
-        "/* step2glb --filter --debug-print: a matched element plus the transitive\n\
+        "/* step2glb --filter --extract-step: a matched element plus the transitive\n\
         \x20  closure of everything it references — product structure, shape and\n\
         \x20  representation linkage (relationships followed multi-hop), geometry.\n\
-        \x20  Rename to .step to re-run, or read it to see how geometry is (or is\n\
-        \x20  not) attached. */\n",
+        \x20  A standalone, re-runnable STEP file. */\n",
     );
     let (h0, h1) = sf.header_range;
     if h1 > h0 && h1 <= sf.data.len() {
@@ -751,16 +768,8 @@ fn write_filter_excerpt(sf: &StepFile, ids: &[u32], path: &std::path::Path) {
     }
     out.push_str("ENDSEC;\nEND-ISO-10303-21;\n");
     match std::fs::write(path, out) {
-        Ok(()) => eprintln!(
-            "--filter --debug-print: wrote {} entities to {}",
-            ids.len(),
-            path.display()
-        ),
-        Err(e) => eprintln!(
-            "--filter --debug-print: cannot write {}: {}",
-            path.display(),
-            e
-        ),
+        Ok(()) => eprintln!("--extract-step: wrote {} entities to {}", ids.len(), path.display()),
+        Err(e) => eprintln!("--extract-step: cannot write {}: {}", path.display(), e),
     }
 }
 
