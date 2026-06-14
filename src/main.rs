@@ -124,6 +124,31 @@ struct Args {
     /// small enough to share. Requires --filter; no GLB is written
     #[arg(long, value_name = "PATH")]
     extract_step: Option<PathBuf>,
+
+    /// Debug: explode each part's geometry into separate named nodes so a bad
+    /// piece can be isolated in a viewer (hierarchical output only). "solid" =
+    /// one node per solid, "shell" = per CLOSED_SHELL, "face" = per
+    /// ADVANCED_FACE (finest). Nodes are named <ENTITY_TYPE>#<id>, so the id
+    /// feeds straight back into --filter "#<id>" --extract-step
+    #[arg(long, value_enum, value_name = "LEVEL")]
+    split: Option<SplitArg>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
+enum SplitArg {
+    Solid,
+    Shell,
+    Face,
+}
+
+impl SplitArg {
+    fn level(self) -> tessellate::SplitLevel {
+        match self {
+            SplitArg::Solid => tessellate::SplitLevel::Solid,
+            SplitArg::Shell => tessellate::SplitLevel::Shell,
+            SplitArg::Face => tessellate::SplitLevel::Face,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
@@ -277,6 +302,12 @@ fn main() {
 
     // ------------------------------------------------------------ merged mode
     if args.merged {
+        if args.split.is_some() {
+            eprintln!(
+                "warning: --split is ignored with --merged (merge collapses geometry by \
+                 color); drop --merged to get one node per solid/shell/face"
+            );
+        }
         let opts = merge::MergeOptions {
             unit_scale: output_scale,
             file_unit_scale,
@@ -323,17 +354,42 @@ fn main() {
         return;
     }
 
-    let mut mesh_of_pd: HashMap<u32, Option<usize>> = HashMap::new();
+    // each product's geometry as one or more (node-label, mesh-index) units:
+    // one merged unit normally, or one per solid/shell/face under --split
+    let mut units_of_pd: HashMap<u32, Vec<(String, usize)>> = HashMap::new();
     let mut mesh_of_hash: HashMap<[u8; 16], usize> = HashMap::new();
+    let split = args.split.map(|s| s.level());
 
     let t1 = Instant::now();
-    let mut get_mesh =
-        |pd: u32, builder: &mut glb::GlbBuilder, stats: &mut TessStats| -> Option<usize> {
-            if let Some(cached) = mesh_of_pd.get(&pd) {
-                return *cached;
+    let mut build_units =
+        |pd: u32, builder: &mut glb::GlbBuilder, stats: &mut TessStats| -> Vec<(String, usize)> {
+            if let Some(cached) = units_of_pd.get(&pd) {
+                return cached.clone();
             }
             let node = asm.products.get(&pd);
-            let mut tm = MeshSet::default();
+            // weld/prepare a finished MeshSet, then dedup it into a mesh index
+            // so identical geometry (instanced parts) is stored once
+            let add = |mut tm: MeshSet,
+                       name: String,
+                       builder: &mut glb::GlbBuilder,
+                       mesh_of_hash: &mut HashMap<[u8; 16], usize>|
+             -> Option<usize> {
+                prepare_mesh(&mut tm, &args);
+                if tm.is_empty() {
+                    return None;
+                }
+                let h = tm.content_hash();
+                Some(match mesh_of_hash.get(&h) {
+                    Some(&i) => i,
+                    None => {
+                        let i = builder.add_mesh(tm, name);
+                        mesh_of_hash.insert(h, i);
+                        i
+                    }
+                })
+            };
+            let mut units: Vec<(String, usize)> = Vec::new();
+            let mut merged = MeshSet::default();
             if let Some(node) = node {
                 for &sr in &node.shape_reps {
                     // SHAPE_REPRESENTATION('', (items), context). Honour this
@@ -352,42 +408,62 @@ fn main() {
                         colors: cx.colors,
                         threads: cx.threads,
                     };
-                    let mut sub = MeshSet::default();
+                    let mut items: Vec<u32> = Vec::new();
                     if let Some(p) = sf.params(sr) {
-                        if let Some(items) = p.get(1).and_then(|v| v.as_list()) {
-                            for it in items {
-                                if let Some(r) = it.as_ref_id() {
-                                    tessellate::tessellate_item(&rep_cx, r, None, &mut sub, stats);
+                        if let Some(list) = p.get(1).and_then(|v| v.as_list()) {
+                            items.extend(list.iter().filter_map(|v| v.as_ref_id()));
+                        }
+                    }
+                    let scale = |mut sub: MeshSet| -> MeshSet {
+                        if (factor - 1.0).abs() > 1e-9 {
+                            sub.transform(&M4::scale_uniform(factor));
+                        }
+                        sub
+                    };
+                    match split {
+                        // default: merge every item of every rep into one mesh
+                        None => {
+                            let mut sub = MeshSet::default();
+                            for r in items {
+                                tessellate::tessellate_item(&rep_cx, r, None, &mut sub, stats);
+                            }
+                            merged.append(&scale(sub));
+                        }
+                        // debug: each solid/shell/face becomes its own node,
+                        // named <ENTITY_TYPE>#<id> for cross-referencing
+                        Some(level) => {
+                            for r in items {
+                                for gid in tessellate::split_units(&sf, r, level) {
+                                    let mut sub = MeshSet::default();
+                                    tessellate::tessellate_item(
+                                        &rep_cx, gid, None, &mut sub, stats,
+                                    );
+                                    let label = format!(
+                                        "{}#{}",
+                                        sf.entity_type(gid).unwrap_or("ENTITY"),
+                                        gid
+                                    );
+                                    if let Some(mi) =
+                                        add(scale(sub), label.clone(), builder, &mut mesh_of_hash)
+                                    {
+                                        units.push((label, mi));
+                                    }
                                 }
                             }
                         }
                     }
-                    if (factor - 1.0).abs() > 1e-9 {
-                        sub.transform(&M4::scale_uniform(factor));
-                    }
-                    tm.append(&sub);
                 }
             }
-            prepare_mesh(&mut tm, &args);
-            let result = if tm.is_empty() {
-                None
-            } else {
-                let h = tm.content_hash();
-                let idx = match mesh_of_hash.get(&h) {
-                    Some(&i) => i,
-                    None => {
-                        let name = node
-                            .map(|n| n.name.clone())
-                            .unwrap_or_else(|| format!("PD#{}", pd));
-                        let i = builder.add_mesh(tm, name);
-                        mesh_of_hash.insert(h, i);
-                        i
-                    }
-                };
-                Some(idx)
-            };
-            mesh_of_pd.insert(pd, result);
-            result
+            if split.is_none() {
+                let name = node
+                    .map(|n| n.name.clone())
+                    .unwrap_or_else(|| format!("PD#{}", pd));
+                if let Some(mi) = add(merged, name.clone(), builder, &mut mesh_of_hash) {
+                    units.push((name, mi));
+                }
+            }
+            units_of_pd.insert(pd, units.clone());
+            units
         };
 
     // -------------------------------------------------------- node expansion
@@ -397,8 +473,9 @@ fn main() {
         name: &str,
         transform: Option<M4>,
         builder: &mut glb::GlbBuilder,
-        get_mesh: &mut dyn FnMut(u32, &mut glb::GlbBuilder, &mut TessStats) -> Option<usize>,
+        build_units: &mut dyn FnMut(u32, &mut glb::GlbBuilder, &mut TessStats) -> Vec<(String, usize)>,
         stats: &mut TessStats,
+        split_on: bool,
         depth: usize,
         budget: &mut i64,
     ) -> Option<usize> {
@@ -406,10 +483,22 @@ fn main() {
             return None;
         }
         *budget -= 1;
-        let mesh = get_mesh(pd, builder, stats);
-        let node = builder.add_node(name.to_string(), transform, mesh);
+        let units = build_units(pd, builder, stats);
+        // without --split the product node carries its one merged mesh; with
+        // --split it carries none and each unit hangs off it as a child node
+        let node_mesh = if split_on {
+            None
+        } else {
+            units.first().map(|(_, mi)| *mi)
+        };
+        let node = builder.add_node(name.to_string(), transform, node_mesh);
+        let mut children: Vec<usize> = Vec::new();
+        if split_on {
+            for (label, mi) in &units {
+                children.push(builder.add_node(label.clone(), None, Some(*mi)));
+            }
+        }
         if let Some(kids) = asm.children.get(&pd) {
-            let mut children = Vec::with_capacity(kids.len());
             for k in kids {
                 if let Some(c) = expand(
                     asm,
@@ -417,16 +506,17 @@ fn main() {
                     &k.name,
                     Some(k.transform),
                     builder,
-                    get_mesh,
+                    build_units,
                     stats,
+                    split_on,
                     depth + 1,
                     budget,
                 ) {
                     children.push(c);
                 }
             }
-            builder.nodes[node].children = children;
         }
+        builder.nodes[node].children = children;
         Some(node)
     }
 
@@ -444,8 +534,9 @@ fn main() {
             &name,
             None,
             &mut builder,
-            &mut get_mesh,
+            &mut build_units,
             &mut stats,
+            split.is_some(),
             0,
             &mut budget,
         ) {
@@ -686,6 +777,14 @@ fn print_settings(args: &Args, threads: usize, file_unit_scale: f64) {
     }
     if let Some(p) = &args.extract_step {
         eprintln!("  extract-step      {} (write subtree STEP, no GLB)", p.display());
+    }
+    if let Some(s) = args.split {
+        let level = match s {
+            SplitArg::Solid => "solid (one node per solid)",
+            SplitArg::Shell => "shell (one node per CLOSED_SHELL)",
+            SplitArg::Face => "face (one node per ADVANCED_FACE)",
+        };
+        eprintln!("  split             {level}");
     }
 }
 

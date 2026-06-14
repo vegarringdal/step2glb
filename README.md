@@ -23,13 +23,17 @@ triangulation with holes).
   `ITEM_DEFINED_TRANSFORMATION` (both simple and complex-instance forms).
 - **Tessellates B-rep geometry**: planes, the quadrics (cylinder / cone /
   sphere / torus), surfaces of linear extrusion and revolution, and
-  (rational) B-spline / NURBS surfaces. Trimmed faces with holes are
-  triangulated in UV space by tess2 (odd winding) — analytic surfaces invert
-  UV in closed form, swept and B-spline surfaces via seeded Newton
-  projection — then refined by midpoint edge subdivision until both the
-  parametric step limits and a perpendicular chord-sag bound are met,
-  Delaunay-flipped in metric UV to remove slivers, and mapped back to 3D
-  with surface normals. Swept surfaces reduce to the equivalent quadric
+  (rational) B-spline / NURBS surfaces. A face whose boundary is a rectangle
+  in parameter space (a full patch or a rectangular sub-patch) is meshed as a
+  **structured grid over its (u,v) domain** — the standard, fold-free way to
+  tessellate a parametric surface, since every cell maps to one small patch
+  and the mesh cannot invert. Genuinely-trimmed faces (inner holes,
+  non-rectangular boundaries) are triangulated in UV space by tess2 (odd
+  winding) instead — analytic surfaces invert UV in closed form, swept and
+  B-spline surfaces via seeded Newton projection. Either way the result is
+  refined by midpoint edge subdivision until both the parametric step limits
+  and a perpendicular chord-sag bound are met, Delaunay-flipped in metric UV
+  to remove slivers, and mapped back to 3D with surface normals. Swept surfaces reduce to the equivalent quadric
   where possible (revolved line ∥ axis -> cylinder, slanted -> cone,
   revolved circle -> sphere/torus, extruded line -> plane). Faces that wrap
   fully around a periodic direction are cut at a seam and rebuilt as band
@@ -128,6 +132,13 @@ step2glb model.step --filter "#584388" -o part.glb
 # relationship hop away or on a sibling definition, so an indirectly-attached
 # brep still shows up. Small enough to share for debugging.
 step2glb model.step --filter "#584388" --extract-step part.step
+
+# explode each part's geometry into separate named nodes, to find a bad piece in
+# a viewer by toggling its visibility. Each node is named <ENTITY_TYPE>#<id>, so
+# the id of the broken one feeds straight back into --filter "#<id>". Levels:
+# solid (one node per solid), shell (per CLOSED_SHELL), face (per ADVANCED_FACE).
+step2glb model.step --split shell -o debug.glb   # 4 shells of a figure as nodes
+step2glb model.step --split face  -o debug.glb   # finest: one node per face
 
 # entity statistics (top types by count) + conversion
 step2glb model.step --stats
@@ -424,11 +435,28 @@ cargo test
       anyway), so near-cusp parameterizations (swept tubes with path kinks,
       helical springs) stop at a sane density instead of exploding to the
       hard cap. The sag bound may go locally unmet right at a cusp.
+- [x] ~~Folded B-spline strips~~: ruled / doubly-curved lofted strips used to
+      come out of tess2's unstructured triangulation folded — inverted,
+      overlapping triangles that left real coverage gaps (a shredded surface,
+      e.g. a figure's shoulder). Rectangular parametric patches are now meshed
+      as a structured (u,v) grid, which follows the surface and cannot invert,
+      so these faces tessellate cleanly without a fold-detection heuristic.
 - [ ] `PCURVE` support: trimming currently always projects 3D edge curves
       via Newton; using the file's 2D parameter curves when present would be
       faster and more robust near surface seams.
 - [ ] Multi-winding periodic loops (|w| > 1) and polar caps on general
       surfaces of revolution are skipped.
+- [x] ~~Seam-straddling "long way around" faces on a closed surface~~: a face
+      on a periodic surface (e.g. a spherical ball-joint) whose outer boundary
+      does not net-wind but straddles the u seam, with the face interior
+      covering *more* than half the period (the complement of the unwrapped
+      polygon). The tessellator used to fill the polygon interior (the short,
+      seam side), so an inner hole on the long side was not cut and the face
+      rendered wrong. Now detected when an inner loop does not nest inside the
+      outer one (impossible for a real hole), and tessellated as one full
+      u-period band with every loop cut out — the bite and the real holes
+      alike — leaving the wrap-around interior. Found via `--split face` on a
+      figure's shoulder/elbow joints (spherical faces #4902148 / #4902755).
 - [x] ~~Transparency (`SURFACE_STYLE_TRANSPARENT`)~~: the styled-item walk reads
       the transparency factor as a sibling of the fill-area colour and folds it
       into the material alpha (alpha = 1 − transparency, ISO 10303-46); the

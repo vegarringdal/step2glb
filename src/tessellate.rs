@@ -195,11 +195,121 @@ pub fn tessellate_item(
             }
             false
         }
+        "CLOSED_SHELL" | "OPEN_SHELL" => {
+            tessellate_shell(cx, id, color, out, stats);
+            true
+        }
+        "ORIENTED_CLOSED_SHELL" => {
+            tessellate_shell(cx, resolve_oriented_shell(sf, id), color, out, stats);
+            true
+        }
         "ADVANCED_FACE" | "FACE_SURFACE" => {
             tessellate_face(cx, id, color, out, stats);
             true
         }
         _ => false,
+    }
+}
+
+/// Granularity at which `--split` breaks a part's geometry into separate nodes,
+/// a debugging aid for locating a bad piece in a viewer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SplitLevel {
+    /// one node per solid item (`MANIFOLD_SOLID_BREP`, …; a shell-model's
+    /// shells count individually)
+    Solid,
+    /// one node per `CLOSED_SHELL` / `OPEN_SHELL` (brep voids included)
+    Shell,
+    /// one node per `ADVANCED_FACE` — the finest, to pinpoint a single face
+    Face,
+}
+
+/// Enumerate the geometry entities under top-level representation `item` at the
+/// given split granularity, each of which [`tessellate_item`] can mesh on its
+/// own. Returns entity ids whose `entity_type` + `#id` make a debuggable node
+/// name that cross-references the source (and `--filter #id --extract-step`).
+pub fn split_units(sf: &StepFile, item: u32, level: SplitLevel) -> Vec<u32> {
+    let ty = match sf.entity_type(item) {
+        Some(t) => t,
+        None => return vec![],
+    };
+    let shells_of = |solid: u32| -> Vec<u32> {
+        // outer shell (param 1) plus any BREP_WITH_VOIDS void shells (param 2)
+        let mut v = vec![];
+        if let Some(p) = sf.params(solid) {
+            if let Some(s) = p.get(1).and_then(|x| x.as_ref_id()) {
+                v.push(resolve_oriented_shell(sf, s));
+            }
+            if ty == "BREP_WITH_VOIDS" {
+                if let Some(voids) = p.get(2).and_then(|x| x.as_list()) {
+                    v.extend(voids.iter().filter_map(|x| x.as_ref_id())
+                        .map(|r| resolve_oriented_shell(sf, r)));
+                }
+            }
+        }
+        v
+    };
+    let model_shells = || -> Vec<u32> {
+        let mut v = vec![];
+        if let Some(p) = sf.params(item) {
+            if let Some(list) = p.get(1).and_then(|x| x.as_list()) {
+                for x in list {
+                    if let Some(r) = x.as_ref_id() {
+                        v.push(resolve_oriented_shell(sf, r));
+                    }
+                }
+            }
+        }
+        v
+    };
+    let faces_of = |shell: u32| -> Vec<u32> {
+        let mut v = vec![];
+        if let Some(p) = sf.params(shell) {
+            if let Some(list) = p.get(1).and_then(|x| x.as_list()) {
+                v.extend(list.iter().filter_map(|x| x.as_ref_id()));
+            }
+        }
+        v
+    };
+    let is_solid = matches!(ty, "MANIFOLD_SOLID_BREP" | "FACETED_BREP" | "BREP_WITH_VOIDS");
+    let is_model = matches!(ty, "SHELL_BASED_SURFACE_MODEL" | "FACE_BASED_SURFACE_MODEL");
+    match level {
+        SplitLevel::Solid => {
+            if is_model {
+                model_shells()
+            } else {
+                vec![item]
+            }
+        }
+        SplitLevel::Shell => {
+            if is_solid {
+                shells_of(item)
+            } else if is_model {
+                model_shells()
+            } else if matches!(ty, "CLOSED_SHELL" | "OPEN_SHELL" | "ORIENTED_CLOSED_SHELL") {
+                vec![resolve_oriented_shell(sf, item)]
+            } else {
+                vec![item]
+            }
+        }
+        SplitLevel::Face => {
+            let shells = if is_solid {
+                shells_of(item)
+            } else if is_model {
+                model_shells()
+            } else {
+                vec![item]
+            };
+            let mut faces = vec![];
+            for s in shells {
+                match sf.entity_type(s) {
+                    Some("CLOSED_SHELL") | Some("OPEN_SHELL") => faces.extend(faces_of(s)),
+                    Some("ADVANCED_FACE") | Some("FACE_SURFACE") => faces.push(s),
+                    _ => faces.push(s),
+                }
+            }
+            faces
+        }
     }
 }
 
@@ -720,17 +830,125 @@ fn face_to_mesh(
     }
 
     let contours: Vec<Vec<[f64; 2]>> = loops_uv.into_iter().map(|l| l.uv).collect();
-    if emit_uv_region(surf, &contours, tp, same_sense, mesh) {
-        return Ok(());
+
+    // Seam-straddling "long way around" faces. On a u-periodic surface a
+    // non-winding outer loop can enclose the *short* side of the seam while the
+    // face interior is the complement — most of the surface, e.g. a spherical
+    // ball-joint with a bite where it meets its socket. The tell is an inner
+    // loop that does not nest inside the outer one: impossible for a real hole,
+    // so the interior must be the other side. Tessellate one full u-period band
+    // minus every loop, which cuts the bite and the real holes alike and leaves
+    // the wrap-around interior.
+    if let Some(per) = per_u {
+        if complement_interior(&contours) {
+            return ok_or(
+                tessellate_periodic_complement(surf, &contours, per, tp, same_sense, mesh),
+                "periodic-complement (wrap-around interior) tessellation failed",
+            );
+        }
     }
-    // tess2 can choke on the inverted boundary of an extreme-aspect lofted
-    // strip; if the boundary spans (almost) the whole knot domain, grid the
-    // patch directly rather than dropping the face.
+
+    // A rectangular B-spline patch is meshed as a structured grid over its
+    // parameter domain: the standard, fold-free way to tessellate a parametric
+    // surface — every cell maps to a small (u,v) patch, so the mesh follows the
+    // surface and never inverts. tess2's unstructured triangulation is reserved
+    // for genuinely-trimmed faces (inner holes / non-rectangular boundaries),
+    // where its long diagonal triangles can otherwise fold a twisted surface
+    // over itself and shred it.
     if tessellate_full_patch(surf, &contours, tp, same_sense, mesh) {
         return Ok(());
     }
-    Err("UV tessellation produced no triangles \
-         (tess2 failed: degenerate or self-intersecting UV contour)")
+    ok_or(
+        emit_uv_region(surf, &contours, tp, same_sense, mesh),
+        "UV tessellation produced no triangles \
+         (tess2 failed: degenerate or self-intersecting UV contour)",
+    )
+}
+
+/// Even-odd point-in-polygon test in UV.
+fn point_in_poly(pt: [f64; 2], poly: &[[f64; 2]]) -> bool {
+    let mut inside = false;
+    let mut j = poly.len().wrapping_sub(1);
+    for i in 0..poly.len() {
+        let (a, b) = (poly[i], poly[j]);
+        if (a[1] > pt[1]) != (b[1] > pt[1]) {
+            let x = a[0] + (pt[1] - a[1]) / (b[1] - a[1]) * (b[0] - a[0]);
+            if pt[0] < x {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
+/// True when `contours` describe a wrap-around (complement) interior: more than
+/// one loop, and some loop's centroid falls outside the largest loop — so it
+/// cannot be a nested hole, and the face interior must be the other side of the
+/// seam. `false` for the ordinary outer-boundary-plus-holes arrangement.
+fn complement_interior(contours: &[Vec<[f64; 2]>]) -> bool {
+    if contours.len() < 2 {
+        return false;
+    }
+    let centroid = |c: &[[f64; 2]]| {
+        let n = c.len().max(1) as f64;
+        [
+            c.iter().map(|p| p[0]).sum::<f64>() / n,
+            c.iter().map(|p| p[1]).sum::<f64>() / n,
+        ]
+    };
+    let outer = (0..contours.len())
+        .max_by(|&a, &b| poly_area(&contours[a]).abs().total_cmp(&poly_area(&contours[b]).abs()))
+        .unwrap();
+    (0..contours.len())
+        .any(|k| k != outer && !point_in_poly(centroid(&contours[k]), &contours[outer]))
+}
+
+/// Tessellate the wrap-around interior of a seam-straddling face: a single full
+/// u-period band with every original loop cut out as a hole (odd winding). The
+/// band's u-edges fall on the same 3D seam (periodic), so the surface closes;
+/// its v-edges sit a hair outside the loops' v-extent, clamped just inside any
+/// pole so the edge is a real parallel rather than the singular point.
+fn tessellate_periodic_complement(
+    surf: &Surface,
+    contours: &[Vec<[f64; 2]>],
+    per_u: f64,
+    tp: &TessParams,
+    same_sense: bool,
+    mesh: &mut TriMesh,
+) -> bool {
+    let (mut umin, mut vmin, mut vmax) = (f64::MAX, f64::MAX, f64::MIN);
+    for c in contours {
+        for p in c {
+            umin = umin.min(p[0]);
+            vmin = vmin.min(p[1]);
+            vmax = vmax.max(p[1]);
+        }
+    }
+    // pad v so loops touching the extent don't lie exactly on the band edge
+    // (degenerate for tess2); keep just inside a pole if the surface caps there
+    let pad = (vmax - vmin) * 1e-3 + 1e-6;
+    let (mut vlo, mut vhi) = (vmin - pad, vmax + pad);
+    if let Some((cb, ct)) = surf.v_caps() {
+        let m = 1e-4 * (vhi - vlo).abs().max(1.0);
+        if cb.is_finite() {
+            vlo = vlo.max(cb + m);
+        }
+        if ct.is_finite() {
+            vhi = vhi.min(ct - m);
+        }
+    }
+    let u0 = umin - 1e-6;
+    let band = vec![
+        [u0, vlo],
+        [u0 + per_u, vlo],
+        [u0 + per_u, vhi],
+        [u0, vhi],
+    ];
+    let mut all: Vec<Vec<[f64; 2]>> = Vec::with_capacity(contours.len() + 1);
+    all.push(band);
+    all.extend(contours.iter().cloned());
+    emit_uv_region(surf, &all, tp, same_sense, mesh)
 }
 
 fn ok_or(success: bool, reason: &'static str) -> Result<(), &'static str> {
@@ -944,13 +1162,27 @@ fn tessellate_full_patch(
     same_sense: bool,
     mesh: &mut TriMesh,
 ) -> bool {
+    match full_patch_rect(surf, contours) {
+        Some((uu, vv)) => tessellate_uv_grid(surf, uu, vv, tp, same_sense, mesh),
+        None => false,
+    }
+}
+
+/// If `contours` is a single, rectangle-like boundary on a B-spline, return the
+/// covered UV rectangle `((u0,u1),(v0,v1))` to grid. "Rectangle-like" = the loop
+/// traces (almost) its own bounding box, so gridding that box reproduces the
+/// face without over-filling a curved/notched trim — this is exactly the shape
+/// of a full or sub-rectangular patch (incl. half of a periodic surface), which
+/// is what folds under tess2. `None` for non-B-splines, inner loops, or
+/// genuinely trimmed (non-rectangular) boundaries.
+fn full_patch_rect(surf: &Surface, contours: &[Vec<[f64; 2]>]) -> Option<((f64, f64), (f64, f64))> {
     let b = match surf {
         Surface::BSpline(b) => b,
-        _ => return false,
+        _ => return None,
     };
-    // a single boundary only: with inner loops a full-domain grid fills holes
+    // a single boundary only: with inner loops a grid fills the holes
     if contours.len() != 1 || contours[0].len() < 3 {
-        return false;
+        return None;
     }
     let ((u0, u1), (v0, v1)) = b.domain();
     let (mut umin, mut umax, mut vmin, mut vmax) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
@@ -960,16 +1192,21 @@ fn tessellate_full_patch(
         vmin = vmin.min(p[1]);
         vmax = vmax.max(p[1]);
     }
-    let (du, dv) = ((u1 - u0).abs(), (v1 - v0).abs());
-    if du < 1e-12 || dv < 1e-12 {
-        return false;
+    let (du, dv) = (umax - umin, vmax - vmin);
+    let (ddu, ddv) = ((u1 - u0).abs(), (v1 - v0).abs());
+    if ddu < 1e-12 || ddv < 1e-12 || du < 1e-6 * ddu || dv < 1e-6 * ddv {
+        return None;
     }
-    if (umax - umin) < 0.8 * du || (vmax - vmin) < 0.8 * dv {
-        return false; // genuinely trimmed in some direction: don't over-fill
+    // the loop must enclose ~its whole bounding box (a rectangle), not a
+    // curved or notched sub-region of it — the grid runs unconditionally for
+    // these, so the bar is high to avoid over-filling past a curved trim
+    if poly_area(&contours[0]).abs() < 0.92 * du * dv {
+        return None;
     }
-    let uu = (umin.clamp(u0, u1), umax.clamp(u0, u1));
-    let vv = (vmin.clamp(v0, v1), vmax.clamp(v0, v1));
-    tessellate_uv_grid(surf, uu, vv, tp, same_sense, mesh)
+    Some((
+        (umin.clamp(u0, u1), umax.clamp(u0, u1)),
+        (vmin.clamp(v0, v1), vmax.clamp(v0, v1)),
+    ))
 }
 
 /// Grid a UV rectangle into a triangle mesh at ~2 samples per knot span (dense
@@ -1807,17 +2044,55 @@ mod tests {
     }
 
     #[test]
-    fn full_patch_gate_rejects_a_genuinely_trimmed_boundary() {
+    fn complement_interior_flags_only_non_nesting_loops() {
+        let outer = vec![[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]];
+        // a hole nested inside the outer boundary is the ordinary case
+        let hole = vec![[1.0, 1.0], [2.0, 1.0], [2.0, 2.0], [1.0, 2.0]];
+        assert!(!complement_interior(&[outer.clone(), hole]));
+        // a loop sitting entirely outside the largest one cannot be a nested
+        // hole: the face interior must be the complement (seam-straddling)
+        let elsewhere = vec![[10.0, 1.0], [11.0, 1.0], [11.0, 2.0], [10.0, 2.0]];
+        assert!(complement_interior(&[outer, elsewhere]));
+        // a single loop is never a complement boundary
+        assert!(!complement_interior(&[vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]]));
+    }
+
+    #[test]
+    fn point_in_poly_basics() {
+        let sq = [[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]];
+        assert!(point_in_poly([1.0, 1.0], &sq));
+        assert!(!point_in_poly([3.0, 1.0], &sq));
+        assert!(!point_in_poly([-1.0, 1.0], &sq));
+    }
+
+    #[test]
+    fn full_patch_gate_grids_a_rectangular_sub_patch() {
+        // A rectangle covering only the first 30% of v is still a valid
+        // (sub-)rectangular patch: gridding its bbox reproduces it, so the gate
+        // must accept it (not reject on coverage alone).
         let s = folded_ribbon();
         let ((u0, u1), (v0, v1)) = domain(&s);
-        // a boundary spanning only the first ~30% of v must NOT be grid-filled
         let vm = v0 + 0.3 * (v1 - v0);
         let contour = vec![vec![[u0, v0], [u1, v0], [u1, vm], [u0, vm]]];
         let tp = TessParams { deflection: 0.1, max_angle: 20.0_f64.to_radians() };
         let mut mesh = TriMesh::default();
+        assert!(tessellate_full_patch(&s, &contour, &tp, true, &mut mesh));
+        assert!(mesh.indices.len() / 3 > 50, "should grid the sub-rectangle");
+    }
+
+    #[test]
+    fn full_patch_gate_rejects_a_non_rectangular_boundary() {
+        // A triangular (or otherwise notched) boundary encloses only ~half its
+        // bounding box; gridding the box would over-fill, so the gate must
+        // reject it and leave it to tess2.
+        let s = folded_ribbon();
+        let ((u0, u1), (v0, v1)) = domain(&s);
+        let contour = vec![vec![[u0, v0], [u1, v0], [u0, v1]]]; // triangle
+        let tp = TessParams { deflection: 0.1, max_angle: 20.0_f64.to_radians() };
+        let mut mesh = TriMesh::default();
         assert!(
             !tessellate_full_patch(&s, &contour, &tp, true, &mut mesh),
-            "a 30%-coverage boundary must not be treated as full-patch"
+            "a non-rectangular boundary must not be grid-filled"
         );
         assert!(mesh.indices.is_empty(), "rejected gate must not emit geometry");
     }

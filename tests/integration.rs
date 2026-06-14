@@ -321,6 +321,38 @@ ENDSEC;";
 }
 
 #[test]
+fn split_units_enumerate_solids_shells_and_faces() {
+    use step2glb::tessellate::{split_units, SplitLevel};
+    // a brep-with-voids (outer shell + one void shell) plus a standalone
+    // shell-model with two shells, to exercise each split granularity
+    let src = "DATA;
+#10=ADVANCED_FACE('',(),#100,.T.);
+#11=ADVANCED_FACE('',(),#100,.T.);
+#12=ADVANCED_FACE('',(),#100,.T.);
+#20=CLOSED_SHELL('',(#10,#11));
+#21=CLOSED_SHELL('',(#12));
+#22=ORIENTED_CLOSED_SHELL('',*,#21,.F.);
+#30=BREP_WITH_VOIDS('',#20,(#22));
+#40=OPEN_SHELL('',(#10));
+#41=OPEN_SHELL('',(#11));
+#50=SHELL_BASED_SURFACE_MODEL('',(#40,#41));
+ENDSEC;";
+    let sf = StepFile::parse(src.as_bytes().to_vec()).expect("parse");
+
+    // solid: the brep is one unit; a shell-model's shells count individually
+    assert_eq!(split_units(&sf, 30, SplitLevel::Solid), vec![30]);
+    assert_eq!(split_units(&sf, 50, SplitLevel::Solid), vec![40, 41]);
+
+    // shell: brep outer shell + resolved void shell; model shells pass through
+    assert_eq!(split_units(&sf, 30, SplitLevel::Shell), vec![20, 21]);
+    assert_eq!(split_units(&sf, 50, SplitLevel::Shell), vec![40, 41]);
+
+    // face: every ADVANCED_FACE under the item (outer #10,#11 + void #12)
+    assert_eq!(split_units(&sf, 30, SplitLevel::Face), vec![10, 11, 12]);
+    assert_eq!(split_units(&sf, 50, SplitLevel::Face), vec![10, 11]);
+}
+
+#[test]
 fn filter_roots_by_name_and_id() {
     let sf = load("assembly.step");
     let asm = hierarchy::build(&sf);
