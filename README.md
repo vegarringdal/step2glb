@@ -140,6 +140,13 @@ step2glb model.step --filter "#584388" --extract-step part.step
 step2glb model.step --split shell -o debug.glb   # 4 shells of a figure as nodes
 step2glb model.step --split face  -o debug.glb   # finest: one node per face
 
+# isolate a single geometry entity by the id --split printed (a face / shell /
+# solid, not just a product): tessellate just it, or extract just its geometry.
+step2glb model.step --filter "#4902148" -o face.glb            # one-face GLB
+step2glb model.step --filter "#4902148" --extract-step face.step  # shareable fragment
+# ...or pull the whole part the entity belongs to (correct units + placement):
+step2glb model.step --filter "#4902148" --with-parent -o part.glb
+
 # entity statistics (top types by count) + conversion
 step2glb model.step --stats
 

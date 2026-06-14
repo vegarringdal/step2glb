@@ -321,6 +321,36 @@ ENDSEC;";
 }
 
 #[test]
+fn entity_filter_resolves_owner_and_closure() {
+    // `--filter #<id>` for a geometry entity (e.g. a face from `--split`): the
+    // id must resolve to the product that owns it, and its reference closure
+    // must be a small self-contained fragment, not the whole file.
+    let sf = load("as1_pe_203.stp");
+    let asm = hierarchy::build(&sf);
+    let face = *sf
+        .of_type("ADVANCED_FACE")
+        .first()
+        .expect("the fixture has faces");
+
+    // owning_product points at a real product whose rep reaches the face
+    let (pd, rep) = hierarchy::owning_product(&sf, &asm, face).expect("face has an owning part");
+    assert!(asm.products.contains_key(&pd), "owner is a known product");
+    assert!(sf.entity_type(rep).is_some_and(|t| t.contains("REPRESENTATION")));
+
+    // the closure contains the face and pulls in its geometry (surface/edges),
+    // but stays far smaller than the whole file
+    let closure = hierarchy::reference_closure(&sf, &[face]);
+    assert!(closure.contains(&face));
+    assert!(closure.len() > 3, "closure pulls in the face's geometry");
+    assert!(
+        closure.len() < sf.entities.len() / 2,
+        "a single face is a focused fragment, not half the model ({} of {})",
+        closure.len(),
+        sf.entities.len()
+    );
+}
+
+#[test]
 fn unsupported_curve_and_item_types_are_recorded() {
     // A planar triangle whose middle edge uses a COMPOSITE_CURVE (a curve type
     // we do not discretize) plus a standalone GEOMETRIC_CURVE_SET (an item we do

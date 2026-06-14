@@ -342,6 +342,68 @@ pub fn filter_roots(asm: &Assembly, query: &str) -> Vec<u32> {
     hits
 }
 
+/// Forward reference closure of `seeds`: the seeds plus every entity reachable
+/// by following `#id` references. Used to extract a single geometry entity
+/// (e.g. a face found via `--split`) as a self-contained fragment for
+/// `--filter #id --extract-step`.
+pub fn reference_closure(sf: &StepFile, seeds: &[u32]) -> Vec<u32> {
+    let mut seen: HashSet<u32> = HashSet::new();
+    let mut stack: Vec<u32> = seeds.to_vec();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        for r in sf.entity_refs(id) {
+            if !seen.contains(&r) {
+                stack.push(r);
+            }
+        }
+    }
+    let mut v: Vec<u32> = seen.into_iter().collect();
+    v.sort_unstable();
+    v
+}
+
+/// Does the forward reference closure of `rep` reach `target`? Bounded BFS that
+/// short-circuits on the first hit.
+fn rep_reaches(sf: &StepFile, rep: u32, target: u32) -> bool {
+    let mut seen: HashSet<u32> = HashSet::new();
+    let mut stack = vec![rep];
+    while let Some(id) = stack.pop() {
+        if id == target {
+            return true;
+        }
+        if !seen.insert(id) {
+            continue;
+        }
+        for r in sf.entity_refs(id) {
+            if !seen.contains(&r) {
+                stack.push(r);
+            }
+        }
+    }
+    false
+}
+
+/// Find a product that owns `entity` — the first (by id) product whose shape
+/// representation reaches `entity` by reference — and that representation.
+/// Resolves a geometry-entity `--filter #id` to its part (for `--with-parent`)
+/// and to that part's modeling unit. `None` if no product's rep reaches it.
+pub fn owning_product(sf: &StepFile, asm: &Assembly, entity: u32) -> Option<(u32, u32)> {
+    let mut pds: Vec<u32> = asm.products.keys().copied().collect();
+    pds.sort_unstable(); // deterministic when geometry is shared across products
+    for pd in pds {
+        if let Some(node) = asm.products.get(&pd) {
+            for &sr in &node.shape_reps {
+                if rep_reaches(sf, sr, entity) {
+                    return Some((pd, sr));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Reachable leaf product-definitions (no child instances) that have no shape
 /// representation attached — i.e. parts that show up in the tree but carry no
 /// geometry. A strong hint of a geometry linkage we don't follow (a multi-hop

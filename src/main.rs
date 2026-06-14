@@ -109,13 +109,23 @@ struct Args {
     #[arg(long, value_enum, default_value_t = UpAxis::Z)]
     up_axis: UpAxis,
 
-    /// Debug: restrict output to the element(s) matching this query plus their
-    /// whole subtree — to isolate why an element is missing or wrong. Matches a
-    /// PRODUCT_DEFINITION id as `#<n>`/`<n>`, else a case-insensitive substring
-    /// of the product name. With --tree prints just that subtree; pair with
-    /// --extract-step to dump it to a new STEP file
+    /// Debug: restrict output to what this query selects. A `#<n>`/`<n>` id that
+    /// names a PRODUCT_DEFINITION (or a case-insensitive substring of a product
+    /// name) selects that element plus its whole subtree. A `#<n>` id that names
+    /// a geometry entity instead — a face / shell / solid, e.g. one printed by
+    /// --split — isolates just that entity (add --with-parent for its whole
+    /// part). With --tree prints the subtree; pair with --extract-step to dump
+    /// the selection to a new standalone STEP file
     #[arg(long)]
     filter: Option<String>,
+
+    /// Debug: with `--filter #<id>` naming a geometry entity (a face / shell /
+    /// solid id, e.g. one printed by `--split`), include its whole parent part
+    /// instead of just the entity — resolves the id to the product that owns it
+    /// and isolates that, so the entity is shown in context with correct units
+    /// and placement. No effect when `--filter` already names a product.
+    #[arg(long)]
+    with_parent: bool,
 
     /// Debug: write the --filter selection to a new standalone STEP file at
     /// this path — the matched element plus the transitive closure of
@@ -211,34 +221,83 @@ fn main() {
     }
 
     let mut asm = hierarchy::build(&sf);
+    // a non-product geometry entity to isolate (a face / shell / solid id, e.g.
+    // one printed by --split), with the representation that owns it (for units)
+    let mut entity_filter: Option<u32> = None;
+    let mut entity_rep: Option<u32> = None;
     if let Some(query) = &args.filter {
         let roots = hierarchy::filter_roots(&asm, query);
-        if roots.is_empty() {
-            eprintln!("error: --filter {:?} matched no product", query);
+        if !roots.is_empty() {
+            eprintln!("filter {:?} -> {} subtree root(s):", query, roots.len());
+            for &pd in &roots {
+                let node = asm.products.get(&pd);
+                let name = node.map(|n| n.name.as_str()).unwrap_or("?");
+                let reps = node.map(|n| n.shape_reps.len()).unwrap_or(0);
+                let kids = asm.children.get(&pd).map(|k| k.len()).unwrap_or(0);
+                eprintln!(
+                    "  #{pd} {name}  ({reps} shape rep(s), {kids} child instance(s){})",
+                    if reps == 0 { ", no geometry of its own" } else { "" }
+                );
+            }
+            asm.roots = roots;
+        } else if let Some(eid) = query
+            .trim()
+            .strip_prefix('#')
+            .unwrap_or(query.trim())
+            .parse::<u32>()
+            .ok()
+            .filter(|&id| sf.entity_type(id).is_some())
+        {
+            // the id names a geometry entity (not a product) — e.g. an
+            // ADVANCED_FACE / CLOSED_SHELL printed by --split
+            let ety = sf.entity_type(eid).unwrap_or("?");
+            let owner = hierarchy::owning_product(&sf, &asm, eid);
+            if args.with_parent {
+                match owner {
+                    Some((pd, _)) => {
+                        let name = asm.products.get(&pd).map(|n| n.name.as_str()).unwrap_or("?");
+                        eprintln!("filter #{eid} ({ety}) -> parent part #{pd} {name}");
+                        asm.roots = vec![pd];
+                    }
+                    None => {
+                        eprintln!(
+                            "filter #{eid} ({ety}): no owning part found; isolating the entity itself"
+                        );
+                        entity_filter = Some(eid);
+                    }
+                }
+            } else {
+                match owner {
+                    Some((pd, _)) => eprintln!(
+                        "filter #{eid} -> isolating {ety} (owned by part #{pd}; \
+                         add --with-parent for the whole part)"
+                    ),
+                    None => eprintln!("filter #{eid} -> isolating {ety}"),
+                };
+                entity_filter = Some(eid);
+                entity_rep = owner.map(|(_, rep)| rep);
+            }
+        } else {
+            eprintln!(
+                "error: --filter {query:?} matched no product, part name, or entity id",
+            );
             std::process::exit(2);
         }
-        eprintln!("filter {:?} -> {} subtree root(s):", query, roots.len());
-        for &pd in &roots {
-            let node = asm.products.get(&pd);
-            let name = node.map(|n| n.name.as_str()).unwrap_or("?");
-            let reps = node.map(|n| n.shape_reps.len()).unwrap_or(0);
-            let kids = asm.children.get(&pd).map(|k| k.len()).unwrap_or(0);
-            eprintln!(
-                "  #{pd} {name}  ({reps} shape rep(s), {kids} child instance(s){})",
-                if reps == 0 { ", no geometry of its own" } else { "" }
-            );
-        }
-        asm.roots = roots;
     }
 
-    // --extract-step: write the selected subtree to a standalone, re-runnable
-    // STEP file (requires --filter, so it's a focused excerpt to share/inspect).
+    // --extract-step: write the selection to a standalone, re-runnable STEP file
+    // (requires --filter, so it's a focused excerpt to share/inspect).
     if let Some(path) = &args.extract_step {
         if args.filter.is_none() {
             eprintln!("error: --extract-step needs --filter to select what to extract");
             std::process::exit(2);
         }
-        let ids = hierarchy::subtree_entities(&sf, &asm, &asm.roots);
+        let ids = match entity_filter {
+            // a single geometry entity: its forward reference closure (surface,
+            // edges, curves, points) — a self-contained geometry fragment
+            Some(eid) => hierarchy::reference_closure(&sf, &[eid]),
+            None => hierarchy::subtree_entities(&sf, &asm, &asm.roots),
+        };
         write_step_excerpt(&sf, &ids, path);
         return;
     }
@@ -299,6 +358,71 @@ fn main() {
         colors: &colors,
         threads,
     };
+
+    // --------------------------------------------- single-entity isolation
+    // `--filter #<id>` naming a geometry entity (without --with-parent):
+    // tessellate just that entity into a one-node GLB. Honour the owning
+    // representation's unit so a metre-context part isn't mis-scaled, mirroring
+    // the per-rep handling in the normal hierarchical path.
+    if let Some(eid) = entity_filter {
+        if args.merged {
+            eprintln!("note: --filter #{eid} isolates a single entity; --merged ignored");
+        }
+        let factor = entity_rep
+            .map(|rep| model::rep_unit_factor(&sf, rep, file_unit_scale))
+            .unwrap_or(1.0);
+        let rep_tp = TessParams {
+            deflection: cx.tp.deflection / factor,
+            max_angle: cx.tp.max_angle,
+        };
+        let rep_cx = tessellate::Ctx {
+            sf: cx.sf,
+            tp: &rep_tp,
+            colors: cx.colors,
+            threads: cx.threads,
+        };
+        let mut tm = MeshSet::default();
+        tessellate::tessellate_item(&rep_cx, eid, None, &mut tm, &mut stats);
+        if (factor - 1.0).abs() > 1e-9 {
+            tm.transform(&M4::scale_uniform(factor));
+        }
+        prepare_mesh(&mut tm, &args);
+        if tm.is_empty() {
+            eprintln!(
+                "error: --filter #{eid} ({}) produced no geometry (not a tessellatable entity?)",
+                sf.entity_type(eid).unwrap_or("?")
+            );
+            report_unsupported(&stats);
+            std::process::exit(2);
+        }
+        let label = format!("{}#{}", sf.entity_type(eid).unwrap_or("ENTITY"), eid);
+        let mi = builder.add_mesh(tm, label.clone());
+        let node = builder.add_node(label.clone(), None, Some(mi));
+        let mut root_m = M4::scale_uniform(output_scale);
+        if args.up_axis == UpAxis::Z {
+            root_m = M4::Z_UP_TO_Y_UP.mul(root_m);
+        }
+        if !root_m.is_identity(1e-12) {
+            let root = builder.add_node("root_transform".into(), Some(root_m), None);
+            builder.nodes[root].children = vec![node];
+            builder.root_nodes = vec![root];
+        } else {
+            builder.root_nodes = vec![node];
+        }
+        eprintln!(
+            "isolated {label}: {} verts, {} tris",
+            builder.total_vertices(),
+            builder.total_triangles()
+        );
+        report_unsupported(&stats);
+        let out_path = args
+            .output
+            .clone()
+            .unwrap_or_else(|| args.input.with_extension("glb"));
+        let bytes = builder.write(&format!("step2glb {}", env!("CARGO_PKG_VERSION")));
+        write_out(&out_path, &bytes, t0);
+        return;
+    }
 
     // ------------------------------------------------------------ merged mode
     if args.merged {
@@ -544,12 +668,26 @@ fn main() {
         }
     }
 
-    // Fallback: no product structure -> dump every standalone solid we can find
+    // Fallback: no product structure -> dump loose geometry, coarsest container
+    // first. Stop at the first tier that yields anything so a brep's own faces
+    // aren't tessellated twice; descend to bare shells / faces only when there
+    // is no enclosing solid (e.g. a `--filter #id --extract-step` fragment of a
+    // single face or shell, which has no brep wrapper).
     if top_nodes.is_empty() {
+        let tiers: [&[&str]; 3] = [
+            merge::FALLBACK_TYPES,
+            &["CLOSED_SHELL", "OPEN_SHELL"],
+            &["ADVANCED_FACE", "FACE_SURFACE"],
+        ];
         let mut tm = MeshSet::default();
-        for ty in merge::FALLBACK_TYPES {
-            for &id in sf.of_type(ty) {
-                tessellate::tessellate_item(&cx, id, None, &mut tm, &mut stats);
+        for tier in tiers {
+            for ty in tier {
+                for &id in sf.of_type(ty) {
+                    tessellate::tessellate_item(&cx, id, None, &mut tm, &mut stats);
+                }
+            }
+            if !tm.is_empty() {
+                break;
             }
         }
         prepare_mesh(&mut tm, &args);
