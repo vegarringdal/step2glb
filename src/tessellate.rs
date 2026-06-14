@@ -534,6 +534,24 @@ fn tessellate_face(
                     mesh.rollback(cp2);
                 }
             }
+            // A planar face whose declared surface trips the trimmer: a PLANE
+            // whose explicit POLY_LOOP polygon doesn't lie on it (a faceted
+            // export quirk — sometimes an orthogonal PLANE — so the boundary
+            // projects to a degenerate UV "slit"), or a flat degree-1 B-spline
+            // patch whose 24-edge boundary self-intersects under Newton UV
+            // inversion. The boundary is the authoritative geometry, so re-fit
+            // the plane to the loop points and tessellate that, taking
+            // orientation from the polygon winding.
+            if surface_is_planar(&surf) {
+                mesh.rollback(cp);
+                if let Some(fitted) = fit_plane(&loops3d) {
+                    if face_to_mesh(&fitted, &loops3d, tp, true, mesh).is_ok() {
+                        stats.faces_ok += 1;
+                        return;
+                    }
+                }
+                mesh.rollback(cp);
+            }
             stats.faces_failed += 1;
             record_failed(stats, sf, surf_id, face, reason);
         }
@@ -661,6 +679,48 @@ fn loop_polyline(
 }
 
 /// Newell-plane fit fallback for faces with unknown surface types.
+/// Is this surface geometrically a plane? True for an explicit `PLANE`, and for
+/// a B-spline whose control points are all coplanar — by the convex-hull
+/// property the whole surface then lies in that plane (CAD commonly emits a flat
+/// region as a degree-1 patch). Used to let a planar face recover via
+/// `fit_plane` when its declared surface trips the trimmer.
+fn surface_is_planar(surf: &Surface) -> bool {
+    match surf {
+        Surface::Plane(_) => true,
+        Surface::BSpline(b) => {
+            let cps = &b.cps;
+            if cps.len() < 3 {
+                return true; // a point/line control net is (degenerately) planar
+            }
+            let o = cps[0];
+            let a = cps
+                .iter()
+                .copied()
+                .max_by(|p, q| o.sub(*p).len().total_cmp(&o.sub(*q).len()))
+                .unwrap();
+            let da = a.sub(o);
+            if da.len() < 1e-9 {
+                return true;
+            }
+            // normal = the control point furthest off the o–a line
+            let mut normal = V3::ZERO;
+            for p in cps {
+                let n = da.cross(p.sub(o));
+                if n.len() > normal.len() {
+                    normal = n;
+                }
+            }
+            if normal.len() < 1e-12 {
+                return true; // all control points collinear
+            }
+            let n = normal.norm();
+            let span = cps.iter().map(|p| p.sub(o).len()).fold(0.0_f64, f64::max);
+            cps.iter().all(|p| p.sub(o).dot(n).abs() <= 1e-3 * span + 1e-6)
+        }
+        _ => false,
+    }
+}
+
 fn fit_plane(loops: &[Loop3]) -> Option<Surface> {
     let outer = &loops.first()?.pts;
     if outer.len() < 3 {
@@ -2104,6 +2164,45 @@ mod tests {
         assert!(complement_interior(&[outer, elsewhere]));
         // a single loop is never a complement boundary
         assert!(!complement_interior(&[vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]]));
+    }
+
+    #[test]
+    fn surface_is_planar_detects_coplanar_control_nets() {
+        use crate::geom::BSplineSurface;
+        let mk = |cps: Vec<V3>| {
+            Surface::BSpline(
+                BSplineSurface {
+                    deg_u: 1,
+                    deg_v: 1,
+                    nu: 2,
+                    nv: 2,
+                    cps,
+                    weights: None,
+                    knots_u: vec![0.0, 0.0, 1.0, 1.0],
+                    knots_v: vec![0.0, 0.0, 1.0, 1.0],
+                    closed_u: false,
+                    closed_v: false,
+                    size: 0.0,
+                }
+                .finish(),
+            )
+        };
+        // a coplanar 2x2 quad (all z = 0) is geometrically a plane
+        let flat = mk(vec![
+            v3(0., 0., 0.),
+            v3(10., 0., 0.),
+            v3(0., 10., 0.),
+            v3(10., 10., 0.),
+        ]);
+        assert!(surface_is_planar(&flat));
+        // lifting one corner makes it a genuine bilinear saddle, not a plane
+        let saddle = mk(vec![
+            v3(0., 0., 0.),
+            v3(10., 0., 0.),
+            v3(0., 10., 0.),
+            v3(10., 10., 5.),
+        ]);
+        assert!(!surface_is_planar(&saddle));
     }
 
     #[test]

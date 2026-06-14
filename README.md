@@ -351,7 +351,7 @@ let asm = step2glb::hierarchy::build(&sf);
 | --------- | -------------------------------------------------------------------------- |
 | Solids    | `MANIFOLD_SOLID_BREP`, `BREP_WITH_VOIDS`, `FACETED_BREP`, `SHELL_BASED_SURFACE_MODEL`, `FACE_BASED_SURFACE_MODEL` |
 | Surfaces  | `PLANE`, `CYLINDRICAL_SURFACE`, `CONICAL_SURFACE`, `SPHERICAL_SURFACE`, `TOROIDAL_SURFACE`, `SURFACE_OF_LINEAR_EXTRUSION`, `SURFACE_OF_REVOLUTION`, `B_SPLINE_SURFACE_WITH_KNOTS` incl. the rational complex-instance form (+ near-planar fallback via Newell plane fit) |
-| Curves    | `LINE`, `CIRCLE`, `ELLIPSE`, `B_SPLINE_CURVE_WITH_KNOTS` (incl. rational complex form), `POLYLINE`, `TRIMMED_CURVE`, `SURFACE_CURVE`/`SEAM_CURVE` (via 3D curve); a null (`$`) or otherwise unresolved edge curve, and anything else, falls back to a straight segment between the edge vertices |
+| Curves    | `LINE`, `CIRCLE`, `ELLIPSE`, `HYPERBOLA`, `PARABOLA`, `B_SPLINE_CURVE_WITH_KNOTS` (incl. rational complex form), `POLYLINE`, `TRIMMED_CURVE`, `COMPOSITE_CURVE` (+ `COMPOSITE_CURVE_SEGMENT`), `SURFACE_CURVE`/`SEAM_CURVE` (via 3D curve); a null (`$`) or otherwise unresolved/unsupported edge curve falls back to a straight segment between the edge vertices (and is tallied in the report) |
 | Tessellated | `TRIANGULATED_FACE_SET`, `TRIANGULATED_SURFACE_SET`, `TESSELLATED_SOLID`, `TESSELLATED_SHELL` |
 | Instancing | `MAPPED_ITEM` / `REPRESENTATION_MAP`, NAUO assembly instances             |
 | Presentation | `STYLED_ITEM`, `OVER_RIDING_STYLED_ITEM` -> `COLOUR_RGB` / `DRAUGHTING_PRE_DEFINED_COLOUR` |
@@ -448,6 +448,19 @@ cargo test
       e.g. a figure's shoulder). Rectangular parametric patches are now meshed
       as a structured (u,v) grid, which follows the surface and cannot invert,
       so these faces tessellate cleanly without a fold-detection heuristic.
+- [x] ~~Planar faces with an inconsistent declared surface~~: a common faceted
+      export quirk is a `FACE_SURFACE` with an explicit `POLY_LOOP` polygon but a
+      `PLANE` whose normal doesn't match the polygon (sometimes orthogonal to
+      it) — projected onto the declared plane the boundary collapses to a
+      zero-area line and was skipped as a "slit". Likewise a flat degree-1
+      `B_SPLINE_SURFACE_WITH_KNOTS` patch whose many-edge boundary self-
+      intersects under Newton UV inversion. The boundary is the authoritative
+      geometry, so when the declared surface is geometrically planar (an explicit
+      `PLANE`, or a B-spline with a coplanar control net — convex-hull property)
+      and tessellation fails, the plane is re-fit to the loop points (Newell) and
+      the polygon tessellated there. Recovered all 25 skipped faces on a 79k-
+      entity test part. Only runs on already-failed faces, so curved surfaces are
+      never flattened.
 - [ ] `PCURVE` support: trimming currently always projects 3D edge curves
       via Newton; using the file's 2D parameter curves when present would be
       faster and more robust near surface seams.
@@ -456,12 +469,16 @@ cargo test
 - [ ] **Unsupported entity types** (found by auditing our reader against the
       AP203/214/242 EXPRESS schemas; each is now counted and reported on the
       console when a file actually uses it — see `TessStats`). Prioritised:
-  - [ ] **`COMPOSITE_CURVE`** (+ `COMPOSITE_CURVE_SEGMENT`) as edge geometry —
-        *highest value*: today the edge silently degrades to a straight chord
-        ("unsupported edge curve types" in the report), so the boundary is
-        wrong rather than skipped. Discretize each segment's `parent_curve`.
-  - [ ] **`HYPERBOLA`, `PARABOLA`** edge curves (the other two conics) — same
-        silent-chord fallback as composite curves.
+  - [x] ~~**`COMPOSITE_CURVE`** (+ `COMPOSITE_CURVE_SEGMENT`) as edge geometry~~:
+        each segment's `parent_curve` (a bounded curve, WR1) is discretized over
+        its own endpoints, oriented by the segment's `same_sense`, stitched on
+        the shared join and run end-to-end along the edge. Tested against a bent
+        2-segment edge whose chord fallback would have collapsed the face.
+  - [x] ~~**`HYPERBOLA`, `PARABOLA`** edge curves~~: parameterized per
+        ISO 10303-42 (verified against OpenCascade `Geom_Hyperbola`/`Geom_Parabola`)
+        — hyperbola `C + a·cosh u·x + b·sinh u·y`, parabola
+        `C + f·u²·x + 2f·u·y` — and adaptively sampled to the deflection. Tested
+        against the analytic enclosed areas (8/3; sinh1·cosh1−1).
   - [ ] **`RECTANGULAR_TRIMMED_SURFACE`** — currently approximated as a flat
         plane (reported under "approximated as a flat plane"); should delegate
         to its `basis_surface` (slot 2) and clamp to the u1/u2/v1/v2 box.

@@ -321,6 +321,156 @@ ENDSEC;";
 }
 
 #[test]
+fn composite_curve_edge_is_discretized_not_chorded() {
+    // A triangle whose A->B edge is a COMPOSITE_CURVE that detours through the
+    // apex M=(5,5,0) (two POLYLINE segments), closed by a straight B->A edge.
+    // Discretized correctly the loop is the triangle A,M,B (area 25); if the
+    // composite fell back to a straight chord the loop A->B->A is degenerate
+    // (zero area) and the face would be lost.
+    let src = "DATA;
+#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=CARTESIAN_POINT('',(10.,0.,0.));
+#3=CARTESIAN_POINT('',(5.,5.,0.));
+#4=VERTEX_POINT('',#1);
+#5=VERTEX_POINT('',#2);
+#10=POLYLINE('',(#1,#3));
+#11=POLYLINE('',(#3,#2));
+#12=COMPOSITE_CURVE_SEGMENT(.CONTINUOUS.,.T.,#10);
+#13=COMPOSITE_CURVE_SEGMENT(.DISCONTINUOUS.,.T.,#11);
+#14=COMPOSITE_CURVE('',(#12,#13),.F.);
+#15=EDGE_CURVE('',#4,#5,#14,.T.);
+#16=DIRECTION('',(-1.,0.,0.));
+#17=VECTOR('',#16,1.);
+#18=LINE('',#2,#17);
+#19=EDGE_CURVE('',#5,#4,#18,.T.);
+#20=ORIENTED_EDGE('',*,*,#15,.T.);
+#21=ORIENTED_EDGE('',*,*,#19,.T.);
+#22=EDGE_LOOP('',(#20,#21));
+#23=FACE_OUTER_BOUND('',#22,.T.);
+#25=DIRECTION('',(0.,0.,1.));
+#26=DIRECTION('',(1.,0.,0.));
+#24=AXIS2_PLACEMENT_3D('',#1,#25,#26);
+#27=PLANE('',#24);
+#28=ADVANCED_FACE('',(#23),#27,.T.);
+#29=CLOSED_SHELL('',(#28));
+#30=MANIFOLD_SOLID_BREP('',#29);
+ENDSEC;";
+    let sf = StepFile::parse(src.as_bytes().to_vec()).expect("parse");
+    let (set, stats) = tessellate_all(&sf, &["MANIFOLD_SOLID_BREP"]);
+    assert_eq!(stats.faces_ok, 1);
+    assert!(stats.unsupported_curves.get("COMPOSITE_CURVE").is_none(), "composite handled");
+    assert!((total_area(&set.merged()) - 25.0).abs() < 1e-6, "area {}", total_area(&set.merged()));
+}
+
+#[test]
+fn parabola_and_hyperbola_edges_match_their_analytic_area() {
+    // PARABOLA P(u)=C+f*u^2*x+2f*u*y with f=1: the arc u in [-1,1] (from
+    // (1,-2) through the vertex (0,0) to (1,2)) closed by the chord x=1 bounds
+    // area integral(-2..2)(1 - y^2/4) dy = 8/3.
+    let para = "DATA;
+#1=CARTESIAN_POINT('',(1.,-2.,0.));
+#2=CARTESIAN_POINT('',(1.,2.,0.));
+#3=VERTEX_POINT('',#1);
+#4=VERTEX_POINT('',#2);
+#5=CARTESIAN_POINT('',(0.,0.,0.));
+#6=DIRECTION('',(0.,0.,1.));
+#7=DIRECTION('',(1.,0.,0.));
+#8=AXIS2_PLACEMENT_3D('',#5,#6,#7);
+#9=PARABOLA('',#8,1.0);
+#10=EDGE_CURVE('',#3,#4,#9,.T.);
+#11=DIRECTION('',(0.,-1.,0.));
+#12=VECTOR('',#11,1.);
+#13=LINE('',#2,#12);
+#14=EDGE_CURVE('',#4,#3,#13,.T.);
+#15=ORIENTED_EDGE('',*,*,#10,.T.);
+#16=ORIENTED_EDGE('',*,*,#14,.T.);
+#17=EDGE_LOOP('',(#15,#16));
+#18=FACE_OUTER_BOUND('',#17,.T.);
+#19=PLANE('',#8);
+#20=ADVANCED_FACE('',(#18),#19,.T.);
+#21=CLOSED_SHELL('',(#20));
+#22=MANIFOLD_SOLID_BREP('',#21);
+ENDSEC;";
+    // a fine deflection so the inscribed-polygon area converges to the analytic
+    // value — this validates the parameterization, not just that it tessellates
+    let fine = TessParams { deflection: 0.002, max_angle: 5.0_f64.to_radians() };
+    let cols = ColorMap::new();
+    let sf = StepFile::parse(para.as_bytes().to_vec()).expect("parse");
+    let (set, stats) = tessellate_with(&sf, &fine, &cols, &["MANIFOLD_SOLID_BREP"]);
+    assert_eq!(stats.faces_ok, 1);
+    assert!(stats.unsupported_curves.get("PARABOLA").is_none());
+    assert!((total_area(&set.merged()) - 8.0 / 3.0).abs() < 0.01, "parabola area {}", total_area(&set.merged()));
+
+    // HYPERBOLA P(u)=C+a*cosh(u)*x+b*sinh(u)*y with a=b=1: arc u in [-1,1]
+    // (vertex (1,0)) closed by the chord x=cosh(1) bounds area sinh(1)*cosh(1)-1.
+    let hyp = "DATA;
+#1=CARTESIAN_POINT('',(1.5430806348,-1.1752011936,0.));
+#2=CARTESIAN_POINT('',(1.5430806348,1.1752011936,0.));
+#3=VERTEX_POINT('',#1);
+#4=VERTEX_POINT('',#2);
+#5=CARTESIAN_POINT('',(0.,0.,0.));
+#6=DIRECTION('',(0.,0.,1.));
+#7=DIRECTION('',(1.,0.,0.));
+#8=AXIS2_PLACEMENT_3D('',#5,#6,#7);
+#9=HYPERBOLA('',#8,1.0,1.0);
+#10=EDGE_CURVE('',#3,#4,#9,.T.);
+#11=DIRECTION('',(0.,-1.,0.));
+#12=VECTOR('',#11,1.);
+#13=LINE('',#2,#12);
+#14=EDGE_CURVE('',#4,#3,#13,.T.);
+#15=ORIENTED_EDGE('',*,*,#10,.T.);
+#16=ORIENTED_EDGE('',*,*,#14,.T.);
+#17=EDGE_LOOP('',(#15,#16));
+#18=FACE_OUTER_BOUND('',#17,.T.);
+#19=PLANE('',#8);
+#20=ADVANCED_FACE('',(#18),#19,.T.);
+#21=CLOSED_SHELL('',(#20));
+#22=MANIFOLD_SOLID_BREP('',#21);
+ENDSEC;";
+    let sf = StepFile::parse(hyp.as_bytes().to_vec()).expect("parse");
+    let (set, stats) = tessellate_with(&sf, &fine, &cols, &["MANIFOLD_SOLID_BREP"]);
+    let expect = 1.0_f64.sinh() * 1.0_f64.cosh() - 1.0;
+    assert_eq!(stats.faces_ok, 1);
+    assert!(stats.unsupported_curves.get("HYPERBOLA").is_none());
+    assert!((total_area(&set.merged()) - expect).abs() < 0.01, "hyperbola area {} (expected {expect})", total_area(&set.merged()));
+}
+
+#[test]
+fn poly_loop_face_recovers_from_an_inconsistent_declared_plane() {
+    // A faceted-export quirk: a FACE_SURFACE has an explicit POLY_LOOP polygon
+    // (a unit square in the XZ plane, normal +Y) but its declared PLANE has an
+    // orthogonal normal (+Z). Projected onto the wrong plane the polygon
+    // collapses to a zero-area line and used to fail as a "slit". The polygon is
+    // authoritative, so the face must recover by re-fitting the plane to it.
+    let src = "DATA;
+#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=CARTESIAN_POINT('',(10.,0.,0.));
+#3=CARTESIAN_POINT('',(10.,0.,10.));
+#4=CARTESIAN_POINT('',(0.,0.,10.));
+#5=POLY_LOOP('',(#1,#2,#3,#4));
+#6=FACE_OUTER_BOUND('',#5,.T.);
+#10=CARTESIAN_POINT('',(0.,0.,0.));
+#11=DIRECTION('',(0.,0.,1.));
+#12=DIRECTION('',(1.,0.,0.));
+#13=AXIS2_PLACEMENT_3D('',#10,#11,#12);
+#14=PLANE('',#13);
+#15=FACE_SURFACE('',(#6),#14,.T.);
+#16=CLOSED_SHELL('',(#15));
+#17=MANIFOLD_SOLID_BREP('',#16);
+ENDSEC;";
+    let sf = StepFile::parse(src.as_bytes().to_vec()).expect("parse");
+    let (set, stats) = tessellate_all(&sf, &["MANIFOLD_SOLID_BREP"]);
+    assert_eq!(stats.faces_ok, 1, "the planar polygon is recovered, not skipped");
+    assert_eq!(stats.faces_failed, 0);
+    // the unit-square (10x10) area is reproduced from the polygon's own plane
+    assert!(
+        (total_area(&set.merged()) - 100.0).abs() < 1e-6,
+        "area {}",
+        total_area(&set.merged())
+    );
+}
+
+#[test]
 fn entity_filter_resolves_owner_and_closure() {
     // `--filter #<id>` for a geometry entity (e.g. a face from `--split`): the
     // id must resolve to the product that owns it, and its reference closure
@@ -352,7 +502,7 @@ fn entity_filter_resolves_owner_and_closure() {
 
 #[test]
 fn unsupported_curve_and_item_types_are_recorded() {
-    // A planar triangle whose middle edge uses a COMPOSITE_CURVE (a curve type
+    // A planar triangle whose middle edge uses an OFFSET_CURVE_3D (a curve type
     // we do not discretize) plus a standalone GEOMETRIC_CURVE_SET (an item we do
     // not tessellate). Both must be tallied so the gaps surface in the console,
     // the benign AXIS2_PLACEMENT_3D datum must NOT be flagged, and the face must
@@ -367,8 +517,7 @@ fn unsupported_curve_and_item_types_are_recorded() {
 #7=DIRECTION('',(1.,0.,0.));
 #8=VECTOR('',#7,1.);
 #9=LINE('',#1,#8);
-#30=COMPOSITE_CURVE_SEGMENT(.CONTINUOUS.,.T.,#9);
-#31=COMPOSITE_CURVE('',(#30),.F.);
+#31=OFFSET_CURVE_3D('',#9,1.0,.F.,#7);
 #11=EDGE_CURVE('',#4,#5,#9,.T.);
 #12=EDGE_CURVE('',#5,#6,#31,.T.);
 #13=EDGE_CURVE('',#6,#4,#9,.T.);
@@ -388,7 +537,7 @@ fn unsupported_curve_and_item_types_are_recorded() {
 ENDSEC;";
     let sf = StepFile::parse(src.as_bytes().to_vec()).expect("parse");
     let (set, stats) = tessellate_all(&sf, &["MANIFOLD_SOLID_BREP", "GEOMETRIC_CURVE_SET"]);
-    assert_eq!(stats.unsupported_curves.get("COMPOSITE_CURVE"), Some(&1));
+    assert_eq!(stats.unsupported_curves.get("OFFSET_CURVE_3D"), Some(&1));
     assert_eq!(stats.unsupported_items.get("GEOMETRIC_CURVE_SET"), Some(&1));
     assert!(stats.unsupported_items.get("AXIS2_PLACEMENT_3D").is_none());
     // the face is not lost — the unsupported edge degrades to a chord

@@ -669,6 +669,106 @@ fn vertex_point(sf: &StepFile, id: u32) -> Option<V3> {
 
 /// Discretize `curve` from `a` to `b` (3D positions of the trimming vertices).
 /// `unsup` tallies curve types we don't support (the edge then falls back to a
+/// Adaptively sample a parametric curve `eval` over `[t0, t1]`, subdividing each
+/// span until its chord sag and turn angle meet the tessellation tolerance.
+/// Returns the points in order, `eval(t0)` first and `eval(t1)` last. Used for
+/// the open conics (hyperbola, parabola) whose curvature varies along the curve.
+fn sample_param_curve(eval: &dyn Fn(f64) -> V3, t0: f64, t1: f64, tp: &TessParams) -> Vec<V3> {
+    fn refine(
+        eval: &dyn Fn(f64) -> V3,
+        ta: f64,
+        tb: f64,
+        pa: V3,
+        pb: V3,
+        tp: &TessParams,
+        depth: u32,
+        out: &mut Vec<V3>,
+    ) {
+        let tm = 0.5 * (ta + tb);
+        let pm = eval(tm);
+        let sag = pm.sub(pa.add(pb).scale(0.5)).len();
+        let (v1, v2) = (pm.sub(pa), pb.sub(pm));
+        let (l1, l2) = (v1.len(), v2.len());
+        let ang = if l1 < 1e-12 || l2 < 1e-12 {
+            0.0
+        } else {
+            (v1.dot(v2) / (l1 * l2)).clamp(-1.0, 1.0).acos()
+        };
+        if depth < 20 && (sag > tp.deflection || ang > tp.max_angle) {
+            refine(eval, ta, tm, pa, pm, tp, depth + 1, out);
+            refine(eval, tm, tb, pm, pb, tp, depth + 1, out);
+        } else {
+            out.push(pb);
+        }
+    }
+    let (pa, pb) = (eval(t0), eval(t1));
+    let mut out = vec![pa];
+    refine(eval, t0, t1, pa, pb, tp, 0, &mut out);
+    out
+}
+
+/// Natural 3D start/end of a *bounded* curve (its own parameterization extent),
+/// used to drive each segment of a `COMPOSITE_CURVE` (whose segments carry no
+/// trim parameters of their own — the parent curve is bounded per WR1).
+fn curve_endpoints(sf: &StepFile, id: u32) -> Option<(V3, V3)> {
+    let ty = sf.entity_type(id)?;
+    let p = sf.params(id)?;
+    match ty {
+        "POLYLINE" => {
+            let l = p.get(1)?.as_list()?;
+            Some((
+                cartesian_point(sf, l.first()?.as_ref_id()?)?,
+                cartesian_point(sf, l.last()?.as_ref_id()?)?,
+            ))
+        }
+        // a clamped B-spline passes through its first and last control points
+        "B_SPLINE_CURVE_WITH_KNOTS" | "RATIONAL_B_SPLINE_CURVE" => {
+            let l = p.get(2)?.as_list()?;
+            Some((
+                cartesian_point(sf, l.first()?.as_ref_id()?)?,
+                cartesian_point(sf, l.last()?.as_ref_id()?)?,
+            ))
+        }
+        TYPE_COMPLEX => {
+            // control points live in the B_SPLINE_CURVE leaf of the complex form
+            let leaf = sf.complex_leaf(id, "B_SPLINE_CURVE")?;
+            let cps = leaf.iter().find_map(|v| {
+                v.as_list()
+                    .filter(|l| !l.is_empty() && l.iter().all(|e| e.as_ref_id().is_some()))
+            })?;
+            Some((
+                cartesian_point(sf, cps.first()?.as_ref_id()?)?,
+                cartesian_point(sf, cps.last()?.as_ref_id()?)?,
+            ))
+        }
+        "TRIMMED_CURVE" => {
+            // prefer explicit CARTESIAN_POINTs in trim_1 / trim_2, else fall back
+            // to the basis curve's own endpoints
+            let trim_pt = |slot: usize| -> Option<V3> {
+                p.get(slot)?
+                    .as_list()?
+                    .iter()
+                    .filter_map(|v| v.as_ref_id())
+                    .find_map(|r| cartesian_point(sf, r))
+            };
+            let (ba, bb) = curve_endpoints(sf, p.get(1)?.as_ref_id()?).unwrap_or((V3::ZERO, V3::ZERO));
+            Some((trim_pt(2).unwrap_or(ba), trim_pt(3).unwrap_or(bb)))
+        }
+        "COMPOSITE_CURVE" => {
+            let segs = p.get(1)?.as_list()?;
+            let seg_pt = |seg: &P, start: bool| -> Option<V3> {
+                let sp = sf.params(seg.as_ref_id()?)?;
+                let same = sp.get(1).and_then(|v| v.as_bool()).unwrap_or(true);
+                let (s, e) = curve_endpoints(sf, sp.get(2)?.as_ref_id()?)?;
+                let (s, e) = if same { (s, e) } else { (e, s) };
+                Some(if start { s } else { e })
+            };
+            Some((seg_pt(segs.first()?, true)?, seg_pt(segs.last()?, false)?))
+        }
+        _ => None,
+    }
+}
+
 /// straight chord), so a silently-straightened boundary is reported.
 fn curve_polyline(
     sf: &StepFile,
@@ -740,6 +840,79 @@ fn curve_polyline(
             } else {
                 None
             }
+        }
+        "HYPERBOLA" => {
+            // HYPERBOLA('', position, semi_axis, semi_imag_axis).
+            // P(u) = C + semi_axis*cosh(u)*x + semi_imag_axis*sinh(u)*y
+            // (ISO 10303-42; matches OpenCascade Geom_Hyperbola). The +x branch.
+            let p = sf.params(id)?;
+            let f = axis2_placement(sf, p.get(1)?.as_ref_id()?)?;
+            let (sa, si) = (p.get(2)?.as_f64()?, p.get(3)?.as_f64()?);
+            let eval = |u: f64| {
+                f.o.add(f.x.scale(sa * u.cosh())).add(f.y.scale(si * u.sinh()))
+            };
+            let param = |pt: V3| (pt.sub(f.o).dot(f.y) / si).asinh();
+            let mut pts = sample_param_curve(&eval, param(a), param(b), tp);
+            *pts.first_mut()? = a;
+            *pts.last_mut()? = b;
+            Some(pts)
+        }
+        "PARABOLA" => {
+            // PARABOLA('', position, focal_dist). focal_dist is the focal length:
+            // P(u) = C + focal_dist*u^2*x + 2*focal_dist*u*y, giving y^2 = 4*f*x
+            // locally (ISO 10303-42; OpenCascade Geom_Parabola). Vertex at u=0.
+            let p = sf.params(id)?;
+            let f = axis2_placement(sf, p.get(1)?.as_ref_id()?)?;
+            let fd = p.get(2)?.as_f64()?;
+            if fd.abs() < 1e-12 {
+                return None;
+            }
+            let eval = |u: f64| f.o.add(f.x.scale(fd * u * u)).add(f.y.scale(2.0 * fd * u));
+            let param = |pt: V3| pt.sub(f.o).dot(f.y) / (2.0 * fd);
+            let mut pts = sample_param_curve(&eval, param(a), param(b), tp);
+            *pts.first_mut()? = a;
+            *pts.last_mut()? = b;
+            Some(pts)
+        }
+        "COMPOSITE_CURVE" => {
+            // COMPOSITE_CURVE('', (segments), self_intersect). Each
+            // COMPOSITE_CURVE_SEGMENT(transition, same_sense, parent_curve) joins
+            // end to end; parent_curve is a bounded_curve (WR1), so it has its own
+            // endpoints. Discretize each parent over its extent, orient it by
+            // same_sense, stitch on the shared join, then run the whole chain a->b.
+            let p = sf.params(id)?;
+            let segs = p.get(1)?.as_list()?;
+            let eps = 1e-6 * (1.0 + a.sub(b).len());
+            let mut out: Vec<V3> = Vec::new();
+            for seg in segs {
+                let sp = sf.params(seg.as_ref_id()?)?;
+                let same = sp.get(1).and_then(|v| v.as_bool()).unwrap_or(true);
+                let parent = sp.get(2)?.as_ref_id()?;
+                let (s, e) = curve_endpoints(sf, parent)?;
+                let (qa, qb) = if same { (s, e) } else { (e, s) };
+                let mut seg_pts = curve_polyline(sf, parent, qa, qb, tp, unsup)?;
+                // make the segment run qa -> qb regardless of how the parent
+                // discretizer ordered it (e.g. a reversed POLYLINE)
+                if seg_pts.len() >= 2
+                    && qa.sub(seg_pts[0]).len() > qa.sub(*seg_pts.last()?).len()
+                {
+                    seg_pts.reverse();
+                }
+                let skip = usize::from(out.last().is_some_and(|t| t.sub(seg_pts[0]).len() < eps));
+                out.extend_from_slice(&seg_pts[skip.min(seg_pts.len())..]);
+            }
+            if out.len() < 2 {
+                return None;
+            }
+            // orient the assembled chain to run from the edge's a to b
+            let fwd = a.sub(out[0]).len() + b.sub(*out.last()?).len();
+            let rev = a.sub(*out.last()?).len() + b.sub(out[0]).len();
+            if rev < fwd {
+                out.reverse();
+            }
+            *out.first_mut()? = a;
+            *out.last_mut()? = b;
+            Some(out)
         }
         "SURFACE_CURVE" | "SEAM_CURVE" | "INTERSECTION_CURVE" | "BOUNDED_CURVE" => {
             // SURFACE_CURVE('', curve_3d, (pcurves), repr) -> follow 3D curve
