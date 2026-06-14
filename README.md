@@ -44,7 +44,8 @@ triangulation with holes).
 - **Reads AP242 tessellated geometry** (`TRIANGULATED_FACE_SET`,
   `TESSELLATED_SOLID`, …) verbatim, and resolves `MAPPED_ITEM` instancing.
 - **Reads colors**: `STYLED_ITEM` / `OVER_RIDING_STYLED_ITEM` presentation
-  chains (both `COLOUR_RGB` and named pre-defined colours) are resolved per
+  chains (both `COLOUR_RGB` and named pre-defined colours, plus
+  `SURFACE_STYLE_TRANSPARENT` folded into the material alpha) are resolved per
   solid/shell/face and become per-color glTF primitives with their own PBR
   materials (deduplicated across the file).
 - **Deduplicates meshes** two ways: per `PRODUCT_DEFINITION` (one mesh shared
@@ -53,10 +54,16 @@ triangulation with holes).
 - **Optimizes** every mesh with meshoptimizer: vertex weld → degenerate
   triangle removal → vertex-cache → vertex-fetch.
 - **Writes a single `.glb`**: full node hierarchy with instance matrices,
-  shared meshes, `POSITION`/`NORMAL` + 32-bit indices, and a root transform
+  shared meshes, `POSITION` (plus `NORMAL` only with `--normals` — off by
+  default) + 32-bit indices, and a root transform
   node converting the file's `LENGTH_UNIT` (mm, cm, m, inch, …) to meters
   and the Z-up engineering convention to glTF's Y-up (STEP has no up-axis
-  field to read; pass `--up-axis y` if a model is already Y-up).
+  field to read; pass `--up-axis y` if a model is already Y-up). Each
+  representation's geometry **and the origins of its assembly placement
+  transforms** are normalized by **its own** context unit, so an Autodesk file
+  that mixes a mm assembly context with metre part contexts isn't silently
+  shrunk 1000× (a part would otherwise collapse to a dot, or — once sized
+  right — be flung away from the assembly by an unscaled placement origin).
 - **Merged mode (`--merged`)**: the rvm_parser_glb output layout instead —
   one node/mesh/material per color with everything baked to world space, and
   per-part drawcall ranges + the id hierarchy in the scene `extras` (see
@@ -78,12 +85,17 @@ is required, and its current bindings need a reasonably recent stable Rust
 
 ## Usage
 
+Every run first prints the effective settings (resolved defaults included —
+output path, deflection, threads, unit handling, normals, optimize/cleanup,
+filter) to stderr, so it's always clear what configuration produced a file.
+
 ```sh
 # convert; writes model.glb next to the input
 step2glb model.step
 
 # choose output and tessellation quality (deflection is in mm, converted into
-# the file's modeling unit so the value means the same regardless of mm/inch/m)
+# each representation's own unit, so it means the same sag even in files that
+# mix units across parts)
 step2glb model.step -o out.glb --deflection 0.05 --max-angle 15
 
 # NOTE: the tighter of the two bounds wins per feature. A curved face with
@@ -163,8 +175,8 @@ both RVM and STEP input:
   `(x, y, z) → (x, z, −y)` rotation rvm_parser_glb applies — `--up-axis y`
   skips it for already-Y-up input), so nodes carry
   no transforms and are named `node0`, `node1`, … with node `N` referencing
-  mesh `N` / material `N`. Unlike rvm_parser_glb, `NORMAL` is kept alongside
-  `POSITION` (the tessellator produces exact analytic normals).
+  mesh `N` / material `N`. Normals are off by default (positions-only, like
+  rvm_parser_glb); `--normals` adds the tessellator's exact analytic `NORMAL`s.
 - **Drawcall metadata in `scenes[0].extras`** — per-part index ranges into
   each merged mesh, plus the full instance tree:
 
@@ -298,7 +310,7 @@ entity file indexes in ~80 ms; a 15 MB assembly converts end-to-end in
 ```
 src/step.rs        Part-21 indexer + lazy parameter parser (incl. complex instances)
 src/geom.rs        V3 / M4 / frames, analytic surfaces, B-spline curve eval
-src/model.rs       typed entity accessors, edge-curve discretization
+src/model.rs       typed entity accessors, edge-curve discretization, per-context units
 src/tessellate.rs  B-rep traversal, UV tessellation, seam handling, refinement
 src/hierarchy.rs   product graph, NAUO edges, instance transforms
 src/styles.rs      STYLED_ITEM color chains, named pre-defined colours
@@ -332,7 +344,7 @@ let asm = step2glb::hierarchy::build(&sf);
 cargo test
 ```
 
-- **Unit tests** (in each module, 36): Part-21 lexing/param parsing edge
+- **Unit tests** (in each module, 43): Part-21 lexing/param parsing edge
   cases (escaped quotes, comments, complex instances, typed params),
   entity-source reconstruction + reference-closure round-trip (the
   `--debug-print` machinery),
@@ -394,10 +406,15 @@ cargo test
   - `colored.step` — a `STYLED_ITEM` chain: color map -> mesh bucket -> GLB
     material assertions.
   - merged mode: draw ranges tile every color mesh's index buffer exactly and
-    all ids resolve in `id_hierarchy` (as1), color buckets and the fallback
+    all ids resolve in `id_hierarchy` (as1), one id per draw call (a multi-color
+    part splits into numbered child nodes), color buckets and the fallback
     part (colored.step), the Z-up -> Y-up bake (cylinder_band.step), and
     `--cleanup-position` output (positions-only primitives, ranges still
     tiling the simplified index buffers, output never larger).
+  - debugging/units: `--filter` name/id resolution and subtree dedup;
+    `--extract-step`'s subtree closure reaches the brep and is deterministic;
+    per-representation length units are read from each context (so a mixed
+    mm/metre file keeps each part's true size).
 
 ## Known limitations / TODO
 
@@ -421,8 +438,18 @@ cargo test
       no `COLOR_0` attribute yet.
 - [ ] Optional `EXT_mesh_gpu_instancing` instead of node-per-instance for
       huge assemblies, and meshopt simplification LODs (`--simplify`).
-- [ ] Streaming/chunked index for files that don't fit in RAM (current
-      design holds the file bytes once; fine into the multi-GB range).
+- [ ] Better streaming for files that don't fit in RAM, on both sides:
+      - **input**: a chunked/streamed index instead of holding all file bytes
+        at once (the current design holds the bytes once — fine into the
+        multi-GB range, but not unbounded).
+      - **output**: a memory threshold (e.g. `--memory-threshold 300mb`) that,
+        when non-zero, spills tessellated geometry to a temp file/buffer and
+        keeps only `[offset, len]` range references in memory instead of
+        holding every mesh; `0` keeps today's all-in-memory behaviour, anything
+        above it tries to stay under that ceiling by streaming parts to disk.
+- [ ] WASM build with streaming to/from the browser's OPFS (Origin Private
+      File System) — depends on the streaming above landing first; the in-memory
+      tessellation buffers need to spill to OPFS to handle large models in-tab.
 - [x] ~~Parallel tessellation~~: `-t/--threads` fans faces out over scoped
       std threads (no new dependency), default auto = CPU cores capped at 4.
       Results merge in face order, so output is byte-identical to serial.

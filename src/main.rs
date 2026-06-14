@@ -1,7 +1,7 @@
 //! step2glb — tessellate STEP (ISO 10303-21) files and export binary glTF,
 //! with assembly-hierarchy dump. Companion in spirit to rvm_parser_glb.
 
-use step2glb::{glb, hierarchy, merge, step, styles, tessellate};
+use step2glb::{glb, hierarchy, merge, model, step, styles, tessellate};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -30,8 +30,9 @@ struct Args {
     output: Option<PathBuf>,
 
     /// Chordal deflection (max sag) for tessellation, in millimetres. It is
-    /// converted into the file's modeling unit, so the same value means the
-    /// same physical tolerance whether the file is in mm, inch or metre
+    /// converted into each representation's own modeling unit, so the same
+    /// value means the same physical tolerance whether a part is in mm, inch or
+    /// metre (Autodesk mixes units across one file)
     #[arg(short, long, default_value_t = 1.0)]
     deflection: f64,
 
@@ -278,6 +279,7 @@ fn main() {
     if args.merged {
         let opts = merge::MergeOptions {
             unit_scale: output_scale,
+            file_unit_scale,
             rotate_z_up: args.up_axis == UpAxis::Z,
             optimize: !args.no_optimize,
             drop_normals: !args.normals,
@@ -334,16 +336,36 @@ fn main() {
             let mut tm = MeshSet::default();
             if let Some(node) = node {
                 for &sr in &node.shape_reps {
-                    // SHAPE_REPRESENTATION('', (items), context)
+                    // SHAPE_REPRESENTATION('', (items), context). Honour this
+                    // representation's own length unit (Autodesk mixes mm and
+                    // metre contexts in one file): tessellate in the rep's unit
+                    // (deflection scaled to match, so --deflection stays in mm),
+                    // then scale the geometry into the global unit.
+                    let factor = model::rep_unit_factor(&sf, sr, file_unit_scale);
+                    let rep_tp = TessParams {
+                        deflection: cx.tp.deflection / factor,
+                        max_angle: cx.tp.max_angle,
+                    };
+                    let rep_cx = tessellate::Ctx {
+                        sf: cx.sf,
+                        tp: &rep_tp,
+                        colors: cx.colors,
+                        threads: cx.threads,
+                    };
+                    let mut sub = MeshSet::default();
                     if let Some(p) = sf.params(sr) {
                         if let Some(items) = p.get(1).and_then(|v| v.as_list()) {
                             for it in items {
                                 if let Some(r) = it.as_ref_id() {
-                                    tessellate::tessellate_item(&cx, r, None, &mut tm, stats);
+                                    tessellate::tessellate_item(&rep_cx, r, None, &mut sub, stats);
                                 }
                             }
                         }
                     }
+                    if (factor - 1.0).abs() > 1e-9 {
+                        sub.transform(&M4::scale_uniform(factor));
+                    }
+                    tm.append(&sub);
                 }
             }
             prepare_mesh(&mut tm, &args);
@@ -883,80 +905,14 @@ fn maybe_write_debug(args: &Args, sf: &StepFile, stats: &TessStats) {
     }
 }
 
-/// Sniff the model's LENGTH_UNIT and return the scale factor to meters.
-/// Looks for SI_UNIT prefixes and inch-based CONVERSION_BASED_UNITs.
+/// The model's global `LENGTH_UNIT` as a scale factor to meters (mm if the file
+/// declares none). Shares [`model::file_length_scale`] with the per-instance
+/// transform unit handling so geometry and placements scale consistently.
 fn detect_length_unit(sf: &StepFile) -> f64 {
-    // SI_UNIT(.MILLI., .METRE.) usually lives inside a complex instance also
-    // tagged LENGTH_UNIT.
-    let candidates: Vec<u32> = sf
-        .of_type("SI_UNIT")
-        .iter()
-        .copied()
-        .chain(
-            sf.by_type
-                .iter()
-                .filter(|(t, _)| sf.type_name(**t) == step::TYPE_COMPLEX)
-                .flat_map(|(_, ids)| ids.iter().copied()),
-        )
-        .collect();
-
-    for id in candidates {
-        let params = if sf.is_complex(id) {
-            if sf.complex_leaf(id, "LENGTH_UNIT").is_none() {
-                continue;
-            }
-            match sf.complex_leaf(id, "SI_UNIT") {
-                Some(p) => p,
-                None => {
-                    // inch & friends: CONVERSION_BASED_UNIT('INCH', measure)
-                    if let Some(cbu) = sf.complex_leaf(id, "CONVERSION_BASED_UNIT") {
-                        if let Some(f) = conversion_unit_scale(&cbu) {
-                            return f;
-                        }
-                    }
-                    continue;
-                }
-            }
-        } else {
-            match sf.params(id) {
-                Some(p) => p,
-                None => continue,
-            }
-        };
-        // SI_UNIT(prefix?, name) — name must be METRE for length
-        let mut prefix: Option<String> = None;
-        let mut name: Option<String> = None;
-        for p in &params {
-            if let step::P::Enum(e) = p {
-                if e == "METRE" {
-                    name = Some(e.clone());
-                } else if name.is_none() && e != "STERADIAN" && e != "RADIAN" {
-                    prefix = Some(e.clone());
-                }
-            }
-        }
-        if name.as_deref() == Some("METRE") {
-            return match prefix.as_deref() {
-                Some("MILLI") => 0.001,
-                Some("CENTI") => 0.01,
-                Some("DECI") => 0.1,
-                Some("KILO") => 1000.0,
-                Some("MICRO") => 1e-6,
-                _ => 1.0,
-            };
-        }
-    }
-    eprintln!("warn: no length unit found, assuming millimetres");
-    0.001
-}
-
-fn conversion_unit_scale(cbu: &[step::P]) -> Option<f64> {
-    let name = cbu.iter().find_map(|p| p.as_str())?.to_ascii_uppercase();
-    match name.as_str() {
-        "INCH" | "\"INCH\"" => Some(0.0254),
-        "FOOT" => Some(0.3048),
-        _ => None,
-    }
+    model::file_length_scale(sf).unwrap_or_else(|| {
+        eprintln!("warn: no length unit found, assuming millimetres");
+        0.001
+    })
 }
 
 fn print_entity_stats(sf: &StepFile) {

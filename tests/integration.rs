@@ -298,6 +298,29 @@ fn assembly_hierarchy_and_instance_transform() {
 }
 
 #[test]
+fn per_representation_length_unit_is_read_from_its_context() {
+    // Autodesk mixes units across contexts in one file: a mm context and a
+    // metre context. Each SHAPE_REPRESENTATION must report its own unit, so a
+    // metre-context part in an otherwise-mm file isn't scaled to nothing.
+    let src = "DATA;
+#1=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.));
+#2=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT($,.METRE.));
+#3=(NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.));
+#10=(GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNIT_ASSIGNED_CONTEXT((#1,#3))REPRESENTATION_CONTEXT('','3D'));
+#11=(GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNIT_ASSIGNED_CONTEXT((#2,#3))REPRESENTATION_CONTEXT('','3D'));
+#20=SHAPE_REPRESENTATION('mm part',(),#10);
+#21=SHAPE_REPRESENTATION('metre part',(),#11);
+ENDSEC;";
+    let sf = StepFile::parse(src.as_bytes().to_vec()).expect("parse");
+    use step2glb::model::{rep_unit_factor, representation_length_scale};
+    assert_eq!(representation_length_scale(&sf, 20), Some(0.001));
+    assert_eq!(representation_length_scale(&sf, 21), Some(1.0));
+    // against a mm global: the mm part is unchanged, the metre part scales 1000x
+    assert!((rep_unit_factor(&sf, 20, 0.001) - 1.0).abs() < 1e-9);
+    assert!((rep_unit_factor(&sf, 21, 0.001) - 1000.0).abs() < 1e-6);
+}
+
+#[test]
 fn filter_roots_by_name_and_id() {
     let sf = load("assembly.step");
     let asm = hierarchy::build(&sf);
@@ -769,6 +792,7 @@ fn build_merged_with(
     let mut stats = TessStats::default();
     let opts = merge::MergeOptions {
         unit_scale: 1.0,
+        file_unit_scale: 1.0,
         rotate_z_up: true,
         optimize: true,
         drop_normals: false,
@@ -912,6 +936,7 @@ fn merged_without_rotation_keeps_z_up() {
     let mut stats = TessStats::default();
     let opts = merge::MergeOptions {
         unit_scale: 1.0,
+        file_unit_scale: 1.0,
         rotate_z_up: false,
         optimize: true,
         drop_normals: false,

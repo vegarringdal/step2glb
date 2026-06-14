@@ -25,6 +25,10 @@ pub const FALLBACK_TYPES: &[&str] = &[
 pub struct MergeOptions {
     /// scale factor to meters, baked into positions before the Y-up rotation
     pub unit_scale: f64,
+    /// the file's global length-unit scale to metres (used to normalize a
+    /// representation that declares a different unit, e.g. an Autodesk part in
+    /// a metre context inside an otherwise-mm file)
+    pub file_unit_scale: f64,
     /// rotate the Z-up input to glTF's Y-up (`M4::Z_UP_TO_Y_UP`); off when
     /// the input is already Y-up
     pub rotate_z_up: bool,
@@ -188,16 +192,36 @@ impl Walk<'_, '_> {
         let mut tm = MeshSet::default();
         if let Some(node) = self.asm.products.get(&pd) {
             for &sr in &node.shape_reps {
-                // SHAPE_REPRESENTATION('', (items), context)
+                // SHAPE_REPRESENTATION('', (items), context). Tessellate in
+                // this representation's own unit (deflection scaled to match),
+                // then scale the geometry into the global unit — so a
+                // metre-context part in an otherwise-mm file is neither shrunk
+                // away nor under-tessellated.
+                let factor = crate::model::rep_unit_factor(self.cx.sf, sr, self.opts.file_unit_scale);
+                let rep_tp = crate::model::TessParams {
+                    deflection: self.cx.tp.deflection / factor,
+                    max_angle: self.cx.tp.max_angle,
+                };
+                let rep_cx = Ctx {
+                    sf: self.cx.sf,
+                    tp: &rep_tp,
+                    colors: self.cx.colors,
+                    threads: self.cx.threads,
+                };
+                let mut sub = MeshSet::default();
                 if let Some(p) = self.cx.sf.params(sr) {
                     if let Some(items) = p.get(1).and_then(|v| v.as_list()) {
                         for it in items {
                             if let Some(r) = it.as_ref_id() {
-                                tessellate::tessellate_item(self.cx, r, None, &mut tm, self.stats);
+                                tessellate::tessellate_item(&rep_cx, r, None, &mut sub, self.stats);
                             }
                         }
                     }
                 }
+                if (factor - 1.0).abs() > 1e-9 {
+                    sub.transform(&M4::scale_uniform(factor));
+                }
+                tm.append(&sub);
             }
         }
         prepare(&mut tm, &self.opts);

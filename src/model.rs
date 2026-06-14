@@ -2,7 +2,109 @@
 //! surface construction and edge-curve discretization.
 
 use crate::geom::*;
-use crate::step::{StepFile, P};
+use crate::step::{StepFile, P, TYPE_COMPLEX};
+
+/// SI length-unit prefix -> metres. (`SI_UNIT(prefix, .METRE.)`.)
+fn si_prefix_scale(prefix: Option<&str>) -> f64 {
+    match prefix {
+        Some("MILLI") => 0.001,
+        Some("CENTI") => 0.01,
+        Some("DECI") => 0.1,
+        Some("DECA") => 10.0,
+        Some("HECTO") => 100.0,
+        Some("KILO") => 1000.0,
+        Some("MICRO") => 1e-6,
+        Some("NANO") => 1e-9,
+        _ => 1.0,
+    }
+}
+
+/// Length scale (to metres) of one unit entity, if it is a length unit: a
+/// metre `SI_UNIT(prefix,.METRE.)` (plain or inside a complex `LENGTH_UNIT`) or
+/// an inch/foot `CONVERSION_BASED_UNIT`. Returns `None` for angle/other units.
+fn length_unit_scale(sf: &StepFile, unit: u32) -> Option<f64> {
+    // an SI metre unit is a length unit whether or not it is tagged LENGTH_UNIT
+    let si = sf
+        .complex_leaf(unit, "SI_UNIT")
+        .or_else(|| sf.params(unit).filter(|_| sf.entity_type(unit) == Some("SI_UNIT")));
+    if let Some(si) = si {
+        let mut prefix = None;
+        let mut metre = false;
+        for v in &si {
+            if let P::Enum(e) = v {
+                if e == "METRE" {
+                    metre = true;
+                } else {
+                    prefix = Some(e.clone());
+                }
+            }
+        }
+        if metre {
+            return Some(si_prefix_scale(prefix.as_deref()));
+        }
+    }
+    // CONVERSION_BASED_UNIT('INCH'|'FOOT', ...) — only when tagged a length unit
+    if sf.complex_leaf(unit, "LENGTH_UNIT").is_some() {
+        if let Some(cbu) = sf.complex_leaf(unit, "CONVERSION_BASED_UNIT") {
+            return match cbu
+                .iter()
+                .find_map(|v| v.as_str())?
+                .trim_matches('"')
+                .to_ascii_uppercase()
+                .as_str()
+            {
+                "INCH" => Some(0.0254),
+                "FOOT" => Some(0.3048),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
+/// The file's global length-unit scale to metres — the first length unit among
+/// the unit entities (plain SI_UNITs, then complex units), matching the scan a
+/// single-context file would use. `None` if no length unit is declared. Shared
+/// by the GLB unit scaling and the per-instance transform unit handling so they
+/// stay consistent.
+pub fn file_length_scale(sf: &StepFile) -> Option<f64> {
+    for &id in sf.of_type("SI_UNIT") {
+        if let Some(s) = length_unit_scale(sf, id) {
+            return Some(s);
+        }
+    }
+    let cty = sf.type_id(TYPE_COMPLEX)?;
+    sf.by_type
+        .get(&cty)?
+        .iter()
+        .find_map(|&id| length_unit_scale(sf, id))
+}
+
+/// Length-unit scale (to metres) of a SHAPE_REPRESENTATION's own context, if it
+/// carries a `GLOBAL_UNIT_ASSIGNED_CONTEXT` with a length unit. Autodesk mixes
+/// mm and metre contexts in one file, so geometry must be scaled per
+/// representation rather than by a single global unit.
+pub fn representation_length_scale(sf: &StepFile, rep: u32) -> Option<f64> {
+    // SHAPE_REPRESENTATION('name', (items), context)
+    let ctx = sf.params(rep)?.get(2).and_then(|v| v.as_ref_id())?;
+    let assigned = sf.complex_leaf(ctx, "GLOBAL_UNIT_ASSIGNED_CONTEXT")?;
+    assigned
+        .iter()
+        .filter_map(|v| v.as_list())
+        .flat_map(|l| l.iter().filter_map(|v| v.as_ref_id()))
+        .find_map(|u| length_unit_scale(sf, u))
+}
+
+/// Factor to bring a representation's geometry into the file's global unit, so a
+/// metre-context part in an otherwise-mm file is sized consistently before the
+/// global unit scaling. 1.0 when the representation has no own unit or already
+/// matches the global one.
+pub fn rep_unit_factor(sf: &StepFile, rep: u32, global_scale: f64) -> f64 {
+    match representation_length_scale(sf, rep) {
+        Some(s) if global_scale.abs() > 1e-300 => s / global_scale,
+        _ => 1.0,
+    }
+}
 
 pub fn cartesian_point(sf: &StepFile, id: u32) -> Option<V3> {
     // CARTESIAN_POINT('', (x, y, z))

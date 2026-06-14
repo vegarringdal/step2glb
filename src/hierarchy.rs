@@ -34,6 +34,11 @@ pub struct Assembly {
 
 pub fn build(sf: &StepFile) -> Assembly {
     let mut asm = Assembly::default();
+    // The file's global length unit. Placement transforms below scale each
+    // axis origin by its representation's own unit relative to this, so a
+    // metre-context part placed in a mm assembly assembles correctly (its
+    // geometry is scaled the same way at tessellation time).
+    let global_scale = model::file_length_scale(sf).unwrap_or(0.001);
 
     // --- products ----------------------------------------------------------
     for &pd in sf.of_type("PRODUCT_DEFINITION") {
@@ -131,7 +136,11 @@ pub fn build(sf: &StepFile) -> Assembly {
             Some(&n) => n,
             None => continue,
         };
-        if let Some((rep1, rep2, m1, m2)) = transform_relationship(sf, rel) {
+        if let Some((rep1, rep2, mut m1, mut m2)) = transform_relationship(sf, rel) {
+            // Bring each axis origin into the global unit, matching the
+            // per-representation scaling applied to that rep's geometry.
+            scale_translation(&mut m1, model::rep_unit_factor(sf, rep1, global_scale));
+            scale_translation(&mut m2, model::rep_unit_factor(sf, rep2, global_scale));
             // Which rep belongs to the child product of this NAUO?
             let child_pd = nauo_pds(sf, nauo).1;
             let child_reps: HashSet<u32> = child_pd
@@ -234,6 +243,15 @@ fn nauo_pds(sf: &StepFile, nauo: u32) -> (Option<u32>, Option<u32>) {
             p.get(4).and_then(|v| v.as_ref_id()),
         ),
         None => (None, None),
+    }
+}
+
+/// Scale a rigid transform's translation (column-major origin) in place.
+fn scale_translation(m: &mut M4, f: f64) {
+    if (f - 1.0).abs() > 1e-12 {
+        m.0[12] *= f;
+        m.0[13] *= f;
+        m.0[14] *= f;
     }
 }
 
