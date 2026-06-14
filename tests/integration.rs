@@ -321,6 +321,79 @@ ENDSEC;";
 }
 
 #[test]
+fn geometric_curve_set_becomes_line_geometry() {
+    // a GEOMETRIC_CURVE_SET of datum/reference curves must become a wireframe
+    // (line-topology) bucket, not be skipped as an unsupported item.
+    let src = "DATA;
+#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=CARTESIAN_POINT('',(10.,0.,0.));
+#3=CARTESIAN_POINT('',(10.,10.,0.));
+#4=POLYLINE('',(#1,#2,#3));
+#5=GEOMETRIC_CURVE_SET('',(#4));
+ENDSEC;";
+    let sf = StepFile::parse(src.as_bytes().to_vec()).expect("parse");
+    let (set, stats) = tessellate_all(&sf, &["GEOMETRIC_CURVE_SET"]);
+    assert!(stats.unsupported_items.is_empty(), "handled, not flagged unsupported");
+    let line_parts: Vec<_> = set.parts.iter().filter(|(_, m)| m.lines).collect();
+    assert_eq!(line_parts.len(), 1, "one wireframe bucket");
+    let m = &line_parts[0].1;
+    // a 3-point polyline -> 2 line segments -> 4 indices, and no normals
+    assert_eq!(m.indices.len(), 4);
+    assert!(m.normals.is_empty(), "line geometry is position-only");
+    // it must not be counted as triangles
+    assert_eq!(m.triangle_count(), 0);
+}
+
+#[test]
+fn rectangular_trimmed_surface_resolves_to_curved_basis() {
+    // a RECTANGULAR_TRIMMED_SURFACE over a cylinder must resolve to the cylinder
+    // (so its face tessellates as curved geometry), NOT fall through to None and
+    // get flattened to a plane.
+    let src = "DATA;
+#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=DIRECTION('',(0.,0.,1.));
+#3=DIRECTION('',(1.,0.,0.));
+#4=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+#5=CYLINDRICAL_SURFACE('',#4,10.);
+#6=RECTANGULAR_TRIMMED_SURFACE('',#5,0.,1.5707963,0.,5.,.T.,.T.);
+ENDSEC;";
+    let sf = StepFile::parse(src.as_bytes().to_vec()).expect("parse");
+    let surf = step2glb::model::surface(&sf, 6).expect("resolves to a surface");
+    match surf {
+        step2glb::geom::Surface::Cylinder(_, r) => assert!((r - 10.0).abs() < 1e-9, "radius {r}"),
+        _ => panic!("expected the basis cylinder, got a different surface kind"),
+    }
+}
+
+#[test]
+fn rectangular_trimmed_plane_face_is_not_flattened_as_fallback() {
+    // a planar face whose face_geometry is a RECTANGULAR_TRIMMED_SURFACE over a
+    // PLANE must tessellate through the real (resolved) plane, not the
+    // approximated-as-plane error path.
+    let src = "DATA;
+#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=CARTESIAN_POINT('',(10.,0.,0.));
+#3=CARTESIAN_POINT('',(10.,10.,0.));
+#4=CARTESIAN_POINT('',(0.,10.,0.));
+#5=POLY_LOOP('',(#1,#2,#3,#4));
+#6=FACE_OUTER_BOUND('',#5,.T.);
+#7=DIRECTION('',(0.,0.,1.));
+#8=DIRECTION('',(1.,0.,0.));
+#9=AXIS2_PLACEMENT_3D('',#1,#7,#8);
+#10=PLANE('',#9);
+#11=RECTANGULAR_TRIMMED_SURFACE('',#10,0.,10.,0.,10.,.T.,.T.);
+#12=FACE_SURFACE('',(#6),#11,.T.);
+#13=CLOSED_SHELL('',(#12));
+#14=MANIFOLD_SOLID_BREP('',#13);
+ENDSEC;";
+    let sf = StepFile::parse(src.as_bytes().to_vec()).expect("parse");
+    let (set, stats) = tessellate_all(&sf, &["MANIFOLD_SOLID_BREP"]);
+    assert_eq!(stats.faces_ok, 1);
+    assert!(stats.approximated_surfaces.is_empty(), "resolved, not plane-approximated");
+    assert!((total_area(&set.merged()) - 100.0).abs() < 1e-6, "area {}", total_area(&set.merged()));
+}
+
+#[test]
 fn composite_curve_edge_is_discretized_not_chorded() {
     // A triangle whose A->B edge is a COMPOSITE_CURVE that detours through the
     // apex M=(5,5,0) (two POLYLINE segments), closed by a straight B->A edge.
@@ -503,7 +576,7 @@ fn entity_filter_resolves_owner_and_closure() {
 #[test]
 fn unsupported_curve_and_item_types_are_recorded() {
     // A planar triangle whose middle edge uses an OFFSET_CURVE_3D (a curve type
-    // we do not discretize) plus a standalone GEOMETRIC_CURVE_SET (an item we do
+    // we do not discretize) plus a standalone SWEPT_AREA_SOLID (an item we do
     // not tessellate). Both must be tallied so the gaps surface in the console,
     // the benign AXIS2_PLACEMENT_3D datum must NOT be flagged, and the face must
     // still tessellate (the unsupported edge falls back to a straight chord).
@@ -533,12 +606,12 @@ fn unsupported_curve_and_item_types_are_recorded() {
 #24=ADVANCED_FACE('',(#18),#23,.T.);
 #25=CLOSED_SHELL('',(#24));
 #26=MANIFOLD_SOLID_BREP('',#25);
-#40=GEOMETRIC_CURVE_SET('',());
+#40=SWEPT_AREA_SOLID('',#9,#7);
 ENDSEC;";
     let sf = StepFile::parse(src.as_bytes().to_vec()).expect("parse");
-    let (set, stats) = tessellate_all(&sf, &["MANIFOLD_SOLID_BREP", "GEOMETRIC_CURVE_SET"]);
+    let (set, stats) = tessellate_all(&sf, &["MANIFOLD_SOLID_BREP", "SWEPT_AREA_SOLID"]);
     assert_eq!(stats.unsupported_curves.get("OFFSET_CURVE_3D"), Some(&1));
-    assert_eq!(stats.unsupported_items.get("GEOMETRIC_CURVE_SET"), Some(&1));
+    assert_eq!(stats.unsupported_items.get("SWEPT_AREA_SOLID"), Some(&1));
     assert!(stats.unsupported_items.get("AXIS2_PLACEMENT_3D").is_none());
     // the face is not lost — the unsupported edge degrades to a chord
     assert_eq!(stats.faces_ok, 1);

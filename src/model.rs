@@ -199,6 +199,16 @@ pub fn surface(sf: &StepFile, id: u32) -> Option<Surface> {
             Some(reduce_revolution(curve, axis))
         }
         "B_SPLINE_SURFACE_WITH_KNOTS" => bspline_surface_simple(sf, &p).map(Surface::BSpline),
+        "RECTANGULAR_TRIMMED_SURFACE" => {
+            // ('', basis_surface, u1, u2, v1, v2, usense, vsense): a window onto
+            // the basis surface's parameter domain. A face that uses it carries
+            // explicit boundary loops that lie on the basis (and within the
+            // window), so those loops are the authoritative trim — resolve to the
+            // basis and tessellate normally. The u1/u2/v1/v2 window is redundant
+            // for a bounded face, and usense/vsense only flip the *trimmed*
+            // surface's own parameterization, which we never use.
+            surface(sf, p.get(1)?.as_ref_id()?)
+        }
         _ => None,
     }
 }
@@ -767,6 +777,19 @@ fn curve_endpoints(sf: &StepFile, id: u32) -> Option<(V3, V3)> {
         }
         _ => None,
     }
+}
+
+/// Discretize a standalone *bounded* curve (e.g. a `GEOMETRIC_CURVE_SET`
+/// element) over its full extent into a 3D polyline. `None` for unbounded
+/// (`LINE`/`CIRCLE` with no trim) or unsupported curves.
+pub fn curve_to_polyline(
+    sf: &StepFile,
+    id: u32,
+    tp: &TessParams,
+    unsup: &mut HashMap<String, usize>,
+) -> Option<Vec<V3>> {
+    let (a, b) = curve_endpoints(sf, id)?;
+    curve_polyline(sf, id, a, b, tp, unsup)
 }
 
 /// straight chord), so a silently-straightened boundary is reported.

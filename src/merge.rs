@@ -169,7 +169,8 @@ impl Walk<'_, '_> {
     fn emit_set(&mut self, id: u32, name: &str, set: &MeshSet) {
         let mut first = true;
         for (color, mesh) in &set.parts {
-            if mesh.is_empty() {
+            // wireframe (line) geometry is not part of the merged triangle layout
+            if mesh.is_empty() || mesh.lines {
                 continue;
             }
             let did = if first {

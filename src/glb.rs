@@ -109,9 +109,10 @@ impl GlbBuilder {
                 }
                 prims.push_str(&format!(
                     "{{\"attributes\":{{{}}},\
-                     \"indices\":{},\"mode\":4,\"material\":{}}}",
+                     \"indices\":{},\"mode\":{},\"material\":{}}}",
                     attributes_json(pos_acc, nrm_acc),
                     idx_acc,
+                    if m.lines { 1 } else { 4 }, // glTF LINES vs TRIANGLES
                     material
                 ));
             }
@@ -260,7 +261,8 @@ impl MergedBuilder {
     /// caller mints a fresh id per color slice (see [`crate::merge`]), so a
     /// draw-range id is never shared across color meshes.
     pub fn add_bucket(&mut self, id: u32, color: Option<[f32; 4]>, m: &TriMesh) {
-        if m.is_empty() {
+        // wireframe (line) geometry has no place in the merged triangle layout
+        if m.is_empty() || m.lines {
             return;
         }
         let key = color.map(quantize_color);

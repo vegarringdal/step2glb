@@ -10,6 +10,10 @@ pub struct TriMesh {
     pub positions: Vec<f32>,
     pub normals: Vec<f32>,
     pub indices: Vec<u32>,
+    /// when true the indices are line segments (pairs), not triangles — wireframe
+    /// geometry from a GEOMETRIC_CURVE_SET. The triangle-only passes
+    /// (meshoptimizer, simplification) are skipped and it emits glTF mode 1.
+    pub lines: bool,
 }
 
 impl TriMesh {
@@ -17,10 +21,33 @@ impl TriMesh {
         self.positions.len() / 3
     }
     pub fn triangle_count(&self) -> usize {
-        self.indices.len() / 3
+        // line meshes carry segment pairs, not triangles
+        if self.lines {
+            0
+        } else {
+            self.indices.len() / 3
+        }
     }
     pub fn is_empty(&self) -> bool {
         self.indices.is_empty()
+    }
+
+    /// Append a polyline as glTF LINE segments (consecutive index pairs). No
+    /// normals — line meshes are position-only.
+    pub fn push_polyline(&mut self, pts: &[V3]) {
+        if pts.len() < 2 {
+            return;
+        }
+        self.lines = true;
+        let base = self.vertex_count() as u32;
+        for p in pts {
+            self.positions
+                .extend_from_slice(&[p.x as f32, p.y as f32, p.z as f32]);
+        }
+        for i in 0..pts.len() as u32 - 1 {
+            self.indices.push(base + i);
+            self.indices.push(base + i + 1);
+        }
     }
 
     pub fn push_vertex(&mut self, p: V3, n: V3) {
@@ -145,7 +172,8 @@ impl TriMesh {
     /// vertex-fetch optimization. Without normals, welding is by position
     /// alone (face-boundary vertices merge too).
     pub fn optimize(&mut self) {
-        if self.is_empty() {
+        // meshoptimizer's vertex-cache / fetch passes assume triangle indices
+        if self.is_empty() || self.lines {
             return;
         }
 
@@ -202,7 +230,7 @@ impl TriMesh {
     /// Unlike [`TriMesh::cleanup_positions`] this keeps normals: surviving
     /// vertices are untouched, collapsed-away ones are removed.
     pub fn simplify(&mut self, threshold: f32, target_error: f32) {
-        if self.is_empty() {
+        if self.is_empty() || self.lines {
             return;
         }
         let target = (self.indices.len() as f32 * threshold) as usize;
@@ -253,7 +281,7 @@ impl TriMesh {
     /// compute their own (flat shading / derivatives), exactly as with
     /// rvm_parser_glb output.
     pub fn cleanup_positions(&mut self, precision: u32, threshold: f32, target_error: f32) {
-        if self.is_empty() {
+        if self.is_empty() || self.lines {
             return;
         }
         self.normals.clear();
@@ -400,11 +428,26 @@ impl MeshSet {
         if let Some(i) = self
             .parts
             .iter()
-            .position(|(c, _)| c.map(quantize_color) == key)
+            .position(|(c, m)| !m.lines && c.map(quantize_color) == key)
         {
             return &mut self.parts[i].1;
         }
         self.parts.push((color, TriMesh::default()));
+        &mut self.parts.last_mut().unwrap().1
+    }
+
+    /// A wireframe (line-topology) bucket for `color`, kept separate from the
+    /// triangle bucket of the same colour so the two are never merged.
+    pub fn line_bucket(&mut self, color: Option<[f32; 4]>) -> &mut TriMesh {
+        let key = color.map(quantize_color);
+        if let Some(i) = self
+            .parts
+            .iter()
+            .position(|(c, m)| m.lines && c.map(quantize_color) == key)
+        {
+            return &mut self.parts[i].1;
+        }
+        self.parts.push((color, TriMesh { lines: true, ..Default::default() }));
         &mut self.parts.last_mut().unwrap().1
     }
 
@@ -428,7 +471,11 @@ impl MeshSet {
 
     pub fn append(&mut self, o: &MeshSet) {
         for (c, m) in &o.parts {
-            self.bucket(*c).append(m);
+            if m.lines {
+                self.line_bucket(*c).append(m);
+            } else {
+                self.bucket(*c).append(m);
+            }
         }
     }
 
@@ -480,10 +527,14 @@ impl MeshSet {
     }
 
     /// Flatten into one TriMesh (used by tests/measurements).
+    /// Flatten the triangle buckets into one mesh. Line (wireframe) buckets are
+    /// skipped — a single `TriMesh` is triangle topology and can't carry both.
     pub fn merged(&self) -> TriMesh {
         let mut out = TriMesh::default();
         for (_, m) in &self.parts {
-            out.append(m);
+            if !m.lines {
+                out.append(m);
+            }
         }
         out
     }

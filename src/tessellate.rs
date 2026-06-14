@@ -227,6 +227,11 @@ pub fn tessellate_item(
             tessellate_face(cx, id, color, out, stats);
             true
         }
+        // wireframe (datum / reference curves) -> glTF line geometry
+        "GEOMETRIC_CURVE_SET" | "GEOMETRIC_SET" => {
+            tessellate_curve_set(cx, id, color, out, stats);
+            true
+        }
         // datums/origins legitimately sit in a SHAPE_REPRESENTATION item list
         // next to the geometry and carry no surface — not a missing feature
         "AXIS2_PLACEMENT_3D" | "AXIS2_PLACEMENT_2D" | "AXIS1_PLACEMENT" | "CARTESIAN_POINT"
@@ -237,6 +242,34 @@ pub fn tessellate_item(
             // AP242-ed2 TRIANGULATED_FACE) is surfaced rather than vanishing
             *stats.unsupported_items.entry(other.to_string()).or_insert(0) += 1;
             false
+        }
+    }
+}
+
+/// Emit a `GEOMETRIC_CURVE_SET` / `GEOMETRIC_SET` as wireframe: discretize each
+/// bounded curve element into a glTF LINE polyline (a single line bucket for the
+/// set's colour). Points and untrimmed surfaces in the set carry no displayable
+/// curve and are skipped; unbounded/unsupported curves are tallied as usual.
+fn tessellate_curve_set(
+    cx: &Ctx,
+    id: u32,
+    color: Option<[f32; 4]>,
+    out: &mut MeshSet,
+    stats: &mut TessStats,
+) {
+    let sf = cx.sf;
+    // GEOMETRIC_SET('', (elements))
+    let elems: Vec<u32> = sf
+        .params(id)
+        .and_then(|p| p.get(1).and_then(|v| v.as_list()).map(|l| l.to_vec()))
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|v| v.as_ref_id())
+        .collect();
+    let mesh = out.line_bucket(color);
+    for e in elems {
+        if let Some(poly) = model::curve_to_polyline(sf, e, cx.tp, &mut stats.unsupported_curves) {
+            mesh.push_polyline(&poly);
         }
     }
 }
@@ -957,6 +990,21 @@ fn face_to_mesh(
         }
     }
 
+    // Full-patch B-spline with an unreliable boundary: an extreme-aspect wound
+    // strip (u≈1, v≈16000) is the whole parametric surface, but its boundary
+    // projects (via Newton) to a self-intersecting UV polygon that tess2 folds
+    // and explodes (50% inverted, 100s of thousands of triangles). When the
+    // boundary spans the whole knot domain AND self-crosses, trust the surface
+    // over the garbage boundary and grid the full domain — fold-free, and there
+    // is no trim to over-fill. A clean trim (a simple polygon) is left alone.
+    if let Some((uu, vv)) = full_domain_bspline(surf, &contours) {
+        if poly_self_intersects(&contours[0])
+            && tessellate_uv_grid(surf, uu, vv, tp, same_sense, mesh)
+        {
+            return Ok(());
+        }
+    }
+
     // A rectangular B-spline patch is meshed as a structured grid over its
     // parameter domain: the standard, fold-free way to tessellate a parametric
     // surface — every cell maps to a small (u,v) patch, so the mesh follows the
@@ -1316,6 +1364,70 @@ fn full_patch_rect(surf: &Surface, contours: &[Vec<[f64; 2]>]) -> Option<((f64, 
         (umin.clamp(u0, u1), umax.clamp(u0, u1)),
         (vmin.clamp(v0, v1), vmax.clamp(v0, v1)),
     ))
+}
+
+/// The full knot domain `((u0,u1),(v0,v1))` if `contours` is a single boundary
+/// that spans (nearly) the whole domain of a B-spline in both directions — i.e.
+/// the face is the entire parametric patch, not a trimmed sub-region.
+fn full_domain_bspline(surf: &Surface, contours: &[Vec<[f64; 2]>]) -> Option<((f64, f64), (f64, f64))> {
+    let b = match surf {
+        Surface::BSpline(b) => b,
+        _ => return None,
+    };
+    if contours.len() != 1 || contours[0].len() < 3 {
+        return None;
+    }
+    let ((u0, u1), (v0, v1)) = b.domain();
+    let (mut umin, mut umax, mut vmin, mut vmax) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    for p in &contours[0] {
+        umin = umin.min(p[0]);
+        umax = umax.max(p[0]);
+        vmin = vmin.min(p[1]);
+        vmax = vmax.max(p[1]);
+    }
+    let (ddu, ddv) = ((u1 - u0).abs(), (v1 - v0).abs());
+    if ddu < 1e-12 || ddv < 1e-12 {
+        return None;
+    }
+    if (umax - umin) >= 0.9 * ddu && (vmax - vmin) >= 0.9 * ddv {
+        Some(((u0, u1), (v0, v1)))
+    } else {
+        None
+    }
+}
+
+/// Do segments p1p2 and p3p4 properly cross (interiors intersect)?
+fn segments_cross(p1: [f64; 2], p2: [f64; 2], p3: [f64; 2], p4: [f64; 2]) -> bool {
+    let o = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| {
+        (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    };
+    let (d1, d2) = (o(p3, p4, p1), o(p3, p4, p2));
+    let (d3, d4) = (o(p1, p2, p3), o(p1, p2, p4));
+    ((d1 > 0.0) != (d2 > 0.0)) && ((d3 > 0.0) != (d4 > 0.0))
+}
+
+/// Does the closed polygon `c` self-intersect (any two non-adjacent edges
+/// cross)? A reliable boundary is a simple polygon; a self-crossing one is the
+/// tell that a high-aspect surface's Newton boundary projection is unreliable.
+/// O(n²), only run on full-domain B-spline patches (few, and the alternative is
+/// a fold-shredded tess2 result).
+fn poly_self_intersects(c: &[[f64; 2]]) -> bool {
+    let n = c.len();
+    if n < 4 {
+        return false;
+    }
+    for i in 0..n {
+        let (a1, a2) = (c[i], c[(i + 1) % n]);
+        for j in (i + 2)..n {
+            if i == 0 && j == n - 1 {
+                continue; // edge (n-1, 0) is adjacent to edge (0, 1)
+            }
+            if segments_cross(a1, a2, c[j], c[(j + 1) % n]) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Grid a UV rectangle into a triangle mesh at ~2 samples per knot span (dense
@@ -2229,19 +2341,44 @@ mod tests {
     }
 
     #[test]
-    fn full_patch_gate_rejects_a_non_rectangular_boundary() {
-        // A triangular (or otherwise notched) boundary encloses only ~half its
-        // bounding box; gridding the box would over-fill, so the gate must
-        // reject it and leave it to tess2.
+    fn full_patch_gate_rejects_a_non_rectangular_sub_region() {
+        // A triangular boundary covering only PART of the knot domain (a genuine
+        // trimmed sub-region, not the whole surface) encloses ~half its bbox;
+        // the gate must reject it so the grid doesn't over-fill past the trim.
         let s = folded_ribbon();
         let ((u0, u1), (v0, v1)) = domain(&s);
-        let contour = vec![vec![[u0, v0], [u1, v0], [u0, v1]]]; // triangle
+        let (um, vm) = (u0 + 0.5 * (u1 - u0), v0 + 0.5 * (v1 - v0));
+        let contour = vec![vec![[u0, v0], [um, v0], [u0, vm]]]; // triangle in a quarter
         let tp = TessParams { deflection: 0.1, max_angle: 20.0_f64.to_radians() };
         let mut mesh = TriMesh::default();
         assert!(
             !tessellate_full_patch(&s, &contour, &tp, true, &mut mesh),
-            "a non-rectangular boundary must not be grid-filled"
+            "a non-rectangular sub-region must not be grid-filled"
         );
         assert!(mesh.indices.is_empty(), "rejected gate must not emit geometry");
+    }
+
+    #[test]
+    fn full_domain_self_intersection_distinguishes_wound_strip_from_clean_trim() {
+        // A high-aspect wound strip is the full parametric patch but its boundary
+        // projects to a self-crossing UV polygon; a clean trim is a simple one.
+        // The grid path keys on exactly this: full-domain span + self-crossing.
+        let s = folded_ribbon();
+        let ((u0, u1), (v0, v1)) = domain(&s);
+        // a clean rectangle spanning the domain: full-domain, but simple
+        let simple = vec![[u0, v0], [u1, v0], [u1, v1], [u0, v1]];
+        assert!(full_domain_bspline(&s, std::slice::from_ref(&simple)).is_some());
+        assert!(!poly_self_intersects(&simple));
+        // a bowtie spanning the domain: full-domain AND self-crossing (its two
+        // diagonals cross) — the wound-strip tell
+        let bowtie = vec![[u0, v0], [u1, v1], [u1, v0], [u0, v1]];
+        assert!(full_domain_bspline(&s, std::slice::from_ref(&bowtie)).is_some());
+        assert!(poly_self_intersects(&bowtie));
+        // a small clean triangle in a sub-region is neither full-domain nor self-
+        // crossing, so it is left to tess2 (no over-fill)
+        let (um, vm) = (u0 + 0.4 * (u1 - u0), v0 + 0.4 * (v1 - v0));
+        let tri = vec![[u0, v0], [um, v0], [u0, vm]];
+        assert!(full_domain_bspline(&s, std::slice::from_ref(&tri)).is_none());
+        assert!(!poly_self_intersects(&tri));
     }
 }

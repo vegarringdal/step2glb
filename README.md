@@ -350,9 +350,10 @@ let asm = step2glb::hierarchy::build(&sf);
 | Kind      | Supported                                                                  |
 | --------- | -------------------------------------------------------------------------- |
 | Solids    | `MANIFOLD_SOLID_BREP`, `BREP_WITH_VOIDS`, `FACETED_BREP`, `SHELL_BASED_SURFACE_MODEL`, `FACE_BASED_SURFACE_MODEL` |
-| Surfaces  | `PLANE`, `CYLINDRICAL_SURFACE`, `CONICAL_SURFACE`, `SPHERICAL_SURFACE`, `TOROIDAL_SURFACE`, `SURFACE_OF_LINEAR_EXTRUSION`, `SURFACE_OF_REVOLUTION`, `B_SPLINE_SURFACE_WITH_KNOTS` incl. the rational complex-instance form (+ near-planar fallback via Newell plane fit) |
+| Surfaces  | `PLANE`, `CYLINDRICAL_SURFACE`, `CONICAL_SURFACE`, `SPHERICAL_SURFACE`, `TOROIDAL_SURFACE`, `SURFACE_OF_LINEAR_EXTRUSION`, `SURFACE_OF_REVOLUTION`, `B_SPLINE_SURFACE_WITH_KNOTS` incl. the rational complex-instance form, `RECTANGULAR_TRIMMED_SURFACE` (resolved to its basis surface) (+ near-planar fallback via Newell plane fit) |
 | Curves    | `LINE`, `CIRCLE`, `ELLIPSE`, `HYPERBOLA`, `PARABOLA`, `B_SPLINE_CURVE_WITH_KNOTS` (incl. rational complex form), `POLYLINE`, `TRIMMED_CURVE`, `COMPOSITE_CURVE` (+ `COMPOSITE_CURVE_SEGMENT`), `SURFACE_CURVE`/`SEAM_CURVE` (via 3D curve); a null (`$`) or otherwise unresolved/unsupported edge curve falls back to a straight segment between the edge vertices (and is tallied in the report) |
 | Tessellated | `TRIANGULATED_FACE_SET`, `TRIANGULATED_SURFACE_SET`, `TESSELLATED_SOLID`, `TESSELLATED_SHELL` |
+| Wireframe | `GEOMETRIC_CURVE_SET` / `GEOMETRIC_SET` (datum / reference curves) emitted as glTF LINE primitives; hierarchical output only |
 | Instancing | `MAPPED_ITEM` / `REPRESENTATION_MAP`, NAUO assembly instances             |
 | Presentation | `STYLED_ITEM`, `OVER_RIDING_STYLED_ITEM` -> `COLOUR_RGB` / `DRAUGHTING_PRE_DEFINED_COLOUR` |
 
@@ -442,6 +443,16 @@ cargo test
       anyway), so near-cusp parameterizations (swept tubes with path kinks,
       helical springs) stop at a sane density instead of exploding to the
       hard cap. The sag bound may go locally unmet right at a cusp.
+- [x] ~~Exploding / folded high-aspect wound B-spline strips~~: a structural
+      part's wound body is a degree-3 NURBS with an extreme parameter aspect
+      ratio (u≈1, v≈16000). It is the *whole* parametric patch, but its boundary
+      projects (via Newton) to a **self-intersecting** UV polygon that tess2
+      folds (≈50% inverted) and explodes (≈480k triangles per face). Detected
+      structurally — the boundary spans the whole knot domain *and* self-crosses
+      (no tuned threshold) — and gridded over the full domain instead: fold-free,
+      and there is no trim to over-fill. A clean (simple-polygon) trim is left to
+      tess2, so genuine triangular/curved trims are never flattened. Cut one part
+      from 1.1M→0.53M triangles and its worst faces from 50%→0% folded.
 - [x] ~~Folded B-spline strips~~: ruled / doubly-curved lofted strips used to
       come out of tess2's unstructured triangulation folded — inverted,
       overlapping triangles that left real coverage gaps (a shredded surface,
@@ -479,19 +490,28 @@ cargo test
         — hyperbola `C + a·cosh u·x + b·sinh u·y`, parabola
         `C + f·u²·x + 2f·u·y` — and adaptively sampled to the deflection. Tested
         against the analytic enclosed areas (8/3; sinh1·cosh1−1).
-  - [ ] **`RECTANGULAR_TRIMMED_SURFACE`** — currently approximated as a flat
-        plane (reported under "approximated as a flat plane"); should delegate
-        to its `basis_surface` (slot 2) and clamp to the u1/u2/v1/v2 box.
+  - [x] ~~**`RECTANGULAR_TRIMMED_SURFACE`**~~: resolved to its `basis_surface`
+        (slot 2) and tessellated on it. A bounded face's explicit boundary loops
+        lie on the basis within the u1/u2/v1/v2 window and are the authoritative
+        trim, so the window is redundant and `usense`/`vsense` (which only flip
+        the *trimmed* surface's parameterization, never used) are irrelevant.
+        Curved bases (cylinder, sphere, B-spline) are no longer wrongly flattened
+        by the plane fallback.
   - [ ] **AP242-ed2 tessellated geometry**: `TRIANGULATED_FACE` /
         `COMPLEX_TRIANGULATED_FACE` (note the extra optional `geometric_link`
         slot vs the ed1 `*_FACE_SET` we already read) and strip/fan encodings.
         Make the tessellated reader detect the optional slot by structure.
+  - [x] ~~`GEOMETRIC_CURVE_SET` / `GEOMETRIC_SET`~~: wireframe (datum /
+        reference curves, e.g. structural part `JLDATUM`/`PLDATUM` lines) is
+        emitted as glTF **LINE** primitives (mode 1) — each bounded curve
+        element discretized into a position-only line polyline, kept in its own
+        bucket so the triangle pipeline (meshopt / simplify) never touches it.
+        Hierarchical output only; merged mode skips it.
   - [ ] Lower priority (rare in exchange, surface as skipped-face/approximated
         warnings, not silent): `OFFSET_SURFACE`, `CURVE_BOUNDED_SURFACE`,
         uniform/Bézier `B_SPLINE_*` forms (no explicit knots),
         `SURFACE_CURVE_SWEPT_SURFACE` / `FIXED_REFERENCE_SWEPT_SURFACE`,
-        `SWEPT_AREA_SOLID` / `CSG_SOLID`, `GEOMETRIC_SET` / `GEOMETRIC_CURVE_SET`,
-        `OFFSET_CURVE_2D/3D`.
+        `SWEPT_AREA_SOLID` / `CSG_SOLID`, `OFFSET_CURVE_2D/3D`.
 - [x] ~~Seam-straddling "long way around" faces on a closed surface~~: a face
       on a periodic surface (e.g. a spherical ball-joint) whose outer boundary
       does not net-wind but straddles the u seam, with the face interior
