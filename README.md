@@ -446,6 +446,28 @@ cargo test
       faster and more robust near surface seams.
 - [ ] Multi-winding periodic loops (|w| > 1) and polar caps on general
       surfaces of revolution are skipped.
+- [ ] **Unsupported entity types** (found by auditing our reader against the
+      AP203/214/242 EXPRESS schemas; each is now counted and reported on the
+      console when a file actually uses it — see `TessStats`). Prioritised:
+  - [ ] **`COMPOSITE_CURVE`** (+ `COMPOSITE_CURVE_SEGMENT`) as edge geometry —
+        *highest value*: today the edge silently degrades to a straight chord
+        ("unsupported edge curve types" in the report), so the boundary is
+        wrong rather than skipped. Discretize each segment's `parent_curve`.
+  - [ ] **`HYPERBOLA`, `PARABOLA`** edge curves (the other two conics) — same
+        silent-chord fallback as composite curves.
+  - [ ] **`RECTANGULAR_TRIMMED_SURFACE`** — currently approximated as a flat
+        plane (reported under "approximated as a flat plane"); should delegate
+        to its `basis_surface` (slot 2) and clamp to the u1/u2/v1/v2 box.
+  - [ ] **AP242-ed2 tessellated geometry**: `TRIANGULATED_FACE` /
+        `COMPLEX_TRIANGULATED_FACE` (note the extra optional `geometric_link`
+        slot vs the ed1 `*_FACE_SET` we already read) and strip/fan encodings.
+        Make the tessellated reader detect the optional slot by structure.
+  - [ ] Lower priority (rare in exchange, surface as skipped-face/approximated
+        warnings, not silent): `OFFSET_SURFACE`, `CURVE_BOUNDED_SURFACE`,
+        uniform/Bézier `B_SPLINE_*` forms (no explicit knots),
+        `SURFACE_CURVE_SWEPT_SURFACE` / `FIXED_REFERENCE_SWEPT_SURFACE`,
+        `SWEPT_AREA_SOLID` / `CSG_SOLID`, `GEOMETRIC_SET` / `GEOMETRIC_CURVE_SET`,
+        `OFFSET_CURVE_2D/3D`.
 - [x] ~~Seam-straddling "long way around" faces on a closed surface~~: a face
       on a periodic surface (e.g. a spherical ball-joint) whose outer boundary
       does not net-wind but straddles the u seam, with the face interior

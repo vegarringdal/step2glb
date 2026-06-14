@@ -321,6 +321,52 @@ ENDSEC;";
 }
 
 #[test]
+fn unsupported_curve_and_item_types_are_recorded() {
+    // A planar triangle whose middle edge uses a COMPOSITE_CURVE (a curve type
+    // we do not discretize) plus a standalone GEOMETRIC_CURVE_SET (an item we do
+    // not tessellate). Both must be tallied so the gaps surface in the console,
+    // the benign AXIS2_PLACEMENT_3D datum must NOT be flagged, and the face must
+    // still tessellate (the unsupported edge falls back to a straight chord).
+    let src = "DATA;
+#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=CARTESIAN_POINT('',(10.,0.,0.));
+#3=CARTESIAN_POINT('',(0.,10.,0.));
+#4=VERTEX_POINT('',#1);
+#5=VERTEX_POINT('',#2);
+#6=VERTEX_POINT('',#3);
+#7=DIRECTION('',(1.,0.,0.));
+#8=VECTOR('',#7,1.);
+#9=LINE('',#1,#8);
+#30=COMPOSITE_CURVE_SEGMENT(.CONTINUOUS.,.T.,#9);
+#31=COMPOSITE_CURVE('',(#30),.F.);
+#11=EDGE_CURVE('',#4,#5,#9,.T.);
+#12=EDGE_CURVE('',#5,#6,#31,.T.);
+#13=EDGE_CURVE('',#6,#4,#9,.T.);
+#14=ORIENTED_EDGE('',*,*,#11,.T.);
+#15=ORIENTED_EDGE('',*,*,#12,.T.);
+#16=ORIENTED_EDGE('',*,*,#13,.T.);
+#17=EDGE_LOOP('',(#14,#15,#16));
+#18=FACE_OUTER_BOUND('',#17,.T.);
+#22=AXIS2_PLACEMENT_3D('',#1,#20,#21);
+#20=DIRECTION('',(0.,0.,1.));
+#21=DIRECTION('',(1.,0.,0.));
+#23=PLANE('',#22);
+#24=ADVANCED_FACE('',(#18),#23,.T.);
+#25=CLOSED_SHELL('',(#24));
+#26=MANIFOLD_SOLID_BREP('',#25);
+#40=GEOMETRIC_CURVE_SET('',());
+ENDSEC;";
+    let sf = StepFile::parse(src.as_bytes().to_vec()).expect("parse");
+    let (set, stats) = tessellate_all(&sf, &["MANIFOLD_SOLID_BREP", "GEOMETRIC_CURVE_SET"]);
+    assert_eq!(stats.unsupported_curves.get("COMPOSITE_CURVE"), Some(&1));
+    assert_eq!(stats.unsupported_items.get("GEOMETRIC_CURVE_SET"), Some(&1));
+    assert!(stats.unsupported_items.get("AXIS2_PLACEMENT_3D").is_none());
+    // the face is not lost — the unsupported edge degrades to a chord
+    assert_eq!(stats.faces_ok, 1);
+    assert!(!set.merged().is_empty());
+}
+
+#[test]
 fn split_units_enumerate_solids_shells_and_faces() {
     use step2glb::tessellate::{split_units, SplitLevel};
     // a brep-with-voids (outer shell + one void shell) plus a standalone

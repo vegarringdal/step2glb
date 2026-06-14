@@ -1,6 +1,8 @@
 //! Typed accessors over the lazy STEP index: points, directions, placements,
 //! surface construction and edge-curve discretization.
 
+use std::collections::HashMap;
+
 use crate::geom::*;
 use crate::step::{StepFile, P, TYPE_COMPLEX};
 
@@ -618,7 +620,12 @@ pub struct TessParams {
 /// Discretize an ORIENTED_EDGE (or EDGE_CURVE) into a 3D polyline that starts
 /// at the edge start vertex and ends at the edge end vertex, honouring
 /// orientation. The last point is included.
-pub fn edge_polyline(sf: &StepFile, id: u32, tp: &TessParams) -> Option<Vec<V3>> {
+pub fn edge_polyline(
+    sf: &StepFile,
+    id: u32,
+    tp: &TessParams,
+    unsup: &mut HashMap<String, usize>,
+) -> Option<Vec<V3>> {
     let ty = sf.entity_type(id)?;
     let (edge_id, flip_oriented) = if ty == "ORIENTED_EDGE" {
         // ORIENTED_EDGE('', *, *, edge, orientation)
@@ -643,7 +650,7 @@ pub fn edge_polyline(sf: &StepFile, id: u32, tp: &TessParams) -> Option<Vec<V3>>
 
     let (a, b) = if same_sense { (sv, ev) } else { (ev, sv) };
     let mut pts = curve
-        .and_then(|c| curve_polyline(sf, c, a, b, tp))
+        .and_then(|c| curve_polyline(sf, c, a, b, tp, unsup))
         .unwrap_or_else(|| vec![a, b]);
     if !same_sense {
         pts.reverse();
@@ -661,7 +668,16 @@ fn vertex_point(sf: &StepFile, id: u32) -> Option<V3> {
 }
 
 /// Discretize `curve` from `a` to `b` (3D positions of the trimming vertices).
-fn curve_polyline(sf: &StepFile, id: u32, a: V3, b: V3, tp: &TessParams) -> Option<Vec<V3>> {
+/// `unsup` tallies curve types we don't support (the edge then falls back to a
+/// straight chord), so a silently-straightened boundary is reported.
+fn curve_polyline(
+    sf: &StepFile,
+    id: u32,
+    a: V3,
+    b: V3,
+    tp: &TessParams,
+    unsup: &mut HashMap<String, usize>,
+) -> Option<Vec<V3>> {
     let ty = sf.entity_type(id)?;
     match ty {
         "LINE" => Some(vec![a, b]),
@@ -728,13 +744,13 @@ fn curve_polyline(sf: &StepFile, id: u32, a: V3, b: V3, tp: &TessParams) -> Opti
         "SURFACE_CURVE" | "SEAM_CURVE" | "INTERSECTION_CURVE" | "BOUNDED_CURVE" => {
             // SURFACE_CURVE('', curve_3d, (pcurves), repr) -> follow 3D curve
             let p = sf.params(id)?;
-            curve_polyline(sf, p.get(1)?.as_ref_id()?, a, b, tp)
+            curve_polyline(sf, p.get(1)?.as_ref_id()?, a, b, tp, unsup)
         }
         "TRIMMED_CURVE" => {
             // TRIMMED_CURVE('', basis, trim1, trim2, sense, mode): endpoints are
             // already given by the edge vertices, just discretize the basis.
             let p = sf.params(id)?;
-            curve_polyline(sf, p.get(1)?.as_ref_id()?, a, b, tp)
+            curve_polyline(sf, p.get(1)?.as_ref_id()?, a, b, tp, unsup)
         }
         crate::step::TYPE_COMPLEX => {
             // rational b-spline curve expressed as a complex instance: the
@@ -750,7 +766,13 @@ fn curve_polyline(sf: &StepFile, id: u32, a: V3, b: V3, tp: &TessParams) -> Opti
                 .map(|l| l.iter().filter_map(|v| v.as_f64()).collect::<Vec<f64>>());
             bspline_polyline_core(sf, &params, weights, a, b, true)
         }
-        _ => None, // unsupported curve -> caller falls back to a straight segment
+        _ => {
+            // unsupported curve type -> caller falls back to a straight segment
+            // between the edge vertices; tally it so the lost curvature is
+            // reported rather than silently straightening the boundary
+            *unsup.entry(ty.to_string()).or_insert(0) += 1;
+            None
+        }
     }
 }
 

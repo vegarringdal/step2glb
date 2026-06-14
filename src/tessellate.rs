@@ -41,9 +41,28 @@ pub struct TessStats {
     /// (Newton non-convergence, multi-winding loops, degenerate bounds, …):
     /// count plus a few sample ADVANCED_FACE entity ids for diagnosis
     pub failed_surfaces: HashMap<String, (usize, Vec<u32>)>,
+    /// unknown surface types that were silently approximated by a flat plane
+    /// through the face boundary (the face is NOT skipped, but the curvature
+    /// is lost) — so a missing surface implementation is visible, not silent
+    pub approximated_surfaces: HashMap<String, usize>,
+    /// edge curve types we cannot discretize: the edge falls back to a straight
+    /// chord between its vertices, so the loop is built but the boundary is
+    /// wrong. Counts per type (e.g. COMPOSITE_CURVE, HYPERBOLA, PARABOLA)
+    pub unsupported_curves: HashMap<String, usize>,
+    /// top-level representation items we do not tessellate at all (e.g.
+    /// GEOMETRIC_SET, SWEPT_AREA_SOLID, AP242-ed2 TRIANGULATED_FACE) — counted
+    /// so a whole item silently producing no geometry is surfaced
+    pub unsupported_items: HashMap<String, usize>,
     /// first failing ADVANCED_FACE per surface type, plus the stage that
     /// failed — used by `--debug-print` to dump a self-contained sub-graph
     pub debug_samples: HashMap<String, (u32, &'static str)>,
+}
+
+/// Add the counts of `b` into `a` (a small helper for the per-type tallies).
+fn merge_counts(a: &mut HashMap<String, usize>, b: &HashMap<String, usize>) {
+    for (k, v) in b {
+        *a.entry(k.clone()).or_insert(0) += v;
+    }
 }
 
 impl TessStats {
@@ -51,9 +70,10 @@ impl TessStats {
     pub fn merge(&mut self, o: &TessStats) {
         self.faces_ok += o.faces_ok;
         self.faces_failed += o.faces_failed;
-        for (k, v) in &o.unsupported_surfaces {
-            *self.unsupported_surfaces.entry(k.clone()).or_insert(0) += v;
-        }
+        merge_counts(&mut self.unsupported_surfaces, &o.unsupported_surfaces);
+        merge_counts(&mut self.approximated_surfaces, &o.approximated_surfaces);
+        merge_counts(&mut self.unsupported_curves, &o.unsupported_curves);
+        merge_counts(&mut self.unsupported_items, &o.unsupported_items);
         for (k, (n, ids)) in &o.failed_surfaces {
             let e = self
                 .failed_surfaces
@@ -207,7 +227,17 @@ pub fn tessellate_item(
             tessellate_face(cx, id, color, out, stats);
             true
         }
-        _ => false,
+        // datums/origins legitimately sit in a SHAPE_REPRESENTATION item list
+        // next to the geometry and carry no surface — not a missing feature
+        "AXIS2_PLACEMENT_3D" | "AXIS2_PLACEMENT_2D" | "AXIS1_PLACEMENT" | "CARTESIAN_POINT"
+        | "DIRECTION" | "VECTOR" => false,
+        other => {
+            // a representation item we do not tessellate at all — record it so a
+            // silently-empty item (e.g. GEOMETRIC_SET, SWEPT_AREA_SOLID, an
+            // AP242-ed2 TRIANGULATED_FACE) is surfaced rather than vanishing
+            *stats.unsupported_items.entry(other.to_string()).or_insert(0) += 1;
+            false
+        }
     }
 }
 
@@ -428,7 +458,7 @@ fn tessellate_face(
 
     let surf = model::surface(sf, surf_id);
 
-    let loops3d = build_loops3d(sf, &bounds, tp);
+    let loops3d = build_loops3d(sf, &bounds, tp, &mut stats.unsupported_curves);
     if loops3d.is_empty() {
         // full closed quadric with no bounds: tessellate the whole domain
         if let Some(s) = &surf {
@@ -452,14 +482,23 @@ fn tessellate_face(
     let surf = match surf {
         Some(s) => s,
         None => {
+            let tyname = surface_type_name(sf, surf_id);
             // Unknown surface: near-planar boundary fallback (POLY_LOOP breps)
             match fit_plane(&loops3d) {
-                Some(pl) => pl,
+                Some(pl) => {
+                    // A real but unimplemented surface type (e.g.
+                    // RECTANGULAR_TRIMMED_SURFACE, OFFSET_SURFACE) flattened to
+                    // a plane through its boundary: the face survives but its
+                    // curvature is lost — record it so it isn't silent. Genuine
+                    // faceted breps (no SURFACE entity) legitimately use this
+                    // path and are not flagged.
+                    if tyname.contains("SURFACE") {
+                        *stats.approximated_surfaces.entry(tyname).or_insert(0) += 1;
+                    }
+                    pl
+                }
                 None => {
-                    *stats
-                        .unsupported_surfaces
-                        .entry(surface_type_name(sf, surf_id))
-                        .or_insert(0) += 1;
+                    *stats.unsupported_surfaces.entry(tyname).or_insert(0) += 1;
                     stats.faces_failed += 1;
                     return;
                 }
@@ -483,7 +522,7 @@ fn tessellate_face(
                         deflection: (tp.deflection / div).max(1e-4),
                         max_angle: (tp.max_angle / div.sqrt()).max(0.02),
                     };
-                    let fl = build_loops3d(sf, &bounds, &fine);
+                    let fl = build_loops3d(sf, &bounds, &fine, &mut stats.unsupported_curves);
                     if fl.len() != loops3d.len() {
                         continue;
                     }
@@ -503,7 +542,12 @@ fn tessellate_face(
 
 /// Discretize every FACE_BOUND of a face into 3D boundary polylines at the
 /// given tessellation tolerance (orientation already applied).
-fn build_loops3d(sf: &StepFile, bounds: &[crate::step::P], tp: &TessParams) -> Vec<Loop3> {
+fn build_loops3d(
+    sf: &StepFile,
+    bounds: &[crate::step::P],
+    tp: &TessParams,
+    unsup: &mut HashMap<String, usize>,
+) -> Vec<Loop3> {
     let mut loops3d: Vec<Loop3> = Vec::new();
     for b in bounds {
         let bid = match b.as_ref_id() {
@@ -520,7 +564,7 @@ fn build_loops3d(sf: &StepFile, bounds: &[crate::step::P], tp: &TessParams) -> V
             None => continue,
         };
         let orientation = bp.get(2).and_then(|v| v.as_bool()).unwrap_or(true);
-        if let Some(mut lp) = loop_polyline(sf, loop_id, tp) {
+        if let Some(mut lp) = loop_polyline(sf, loop_id, tp, unsup) {
             if lp.len() >= 3 {
                 if !orientation {
                     lp.reverse();
@@ -571,7 +615,12 @@ fn surface_type_name(sf: &StepFile, surf_id: u32) -> String {
     }
 }
 
-fn loop_polyline(sf: &StepFile, loop_id: u32, tp: &TessParams) -> Option<Vec<V3>> {
+fn loop_polyline(
+    sf: &StepFile,
+    loop_id: u32,
+    tp: &TessParams,
+    unsup: &mut HashMap<String, usize>,
+) -> Option<Vec<V3>> {
     let ty = sf.entity_type(loop_id)?;
     match ty {
         "EDGE_LOOP" => {
@@ -580,7 +629,7 @@ fn loop_polyline(sf: &StepFile, loop_id: u32, tp: &TessParams) -> Option<Vec<V3>
             let mut pts: Vec<V3> = Vec::new();
             for e in edges {
                 let eid = e.as_ref_id()?;
-                let ep = model::edge_polyline(sf, eid, tp)?;
+                let ep = model::edge_polyline(sf, eid, tp, unsup)?;
                 let skip = usize::from(
                     !pts.is_empty()
                         && pts

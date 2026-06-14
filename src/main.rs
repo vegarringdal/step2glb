@@ -830,14 +830,34 @@ fn prepare_mesh(tm: &mut MeshSet, args: &Args) {
 }
 
 fn report_unsupported(stats: &TessStats) {
-    if !stats.unsupported_surfaces.is_empty() {
-        let mut v: Vec<_> = stats.unsupported_surfaces.iter().collect();
-        v.sort_by(|a, b| b.1.cmp(a.1));
-        eprintln!("unsupported surface types (faces skipped):");
+    // print a "count  TYPE" table, most frequent first
+    let table = |title: &str, m: &std::collections::HashMap<String, usize>| {
+        if m.is_empty() {
+            return;
+        }
+        let mut v: Vec<_> = m.iter().collect();
+        v.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        eprintln!("{title}");
         for (ty, n) in v {
             eprintln!("  {:>6}  {}", n, ty);
         }
-    }
+    };
+    table(
+        "unsupported surface types (faces skipped):",
+        &stats.unsupported_surfaces,
+    );
+    table(
+        "unsupported surface types approximated as a flat plane (curvature lost):",
+        &stats.approximated_surfaces,
+    );
+    table(
+        "unsupported edge curve types (boundary straightened to a chord):",
+        &stats.unsupported_curves,
+    );
+    table(
+        "unsupported representation items (no geometry produced):",
+        &stats.unsupported_items,
+    );
     if !stats.failed_surfaces.is_empty() {
         let mut v: Vec<_> = stats.failed_surfaces.iter().collect();
         v.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
