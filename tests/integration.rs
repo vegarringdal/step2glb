@@ -321,6 +321,49 @@ ENDSEC;";
 }
 
 #[test]
+fn ap242_ed2_triangulated_face_decodes_with_geometric_link_slot() {
+    // ed2 TRIANGULATED_FACE inserts a geometric_link ($) between normals and
+    // pnindex; the reader must detect the one-slot shift (off=1) and still read
+    // the triangle list. Unit-square quad -> 2 triangles, area 1.
+    let src = "DATA;
+#1=COORDINATES_LIST('',4,((0.,0.,0.),(1.,0.,0.),(1.,1.,0.),(0.,1.,0.)));
+#2=TRIANGULATED_FACE('',#1,4,(),$,(),((1,2,3),(1,3,4)));
+ENDSEC;";
+    let sf = StepFile::parse(src.as_bytes().to_vec()).expect("parse");
+    let (set, _) = tessellate_all(&sf, &["TRIANGULATED_FACE"]);
+    assert_eq!(set.merged().triangle_count(), 2);
+    assert!((total_area(&set.merged()) - 1.0).abs() < 1e-6, "area {}", total_area(&set.merged()));
+}
+
+#[test]
+fn ap242_ed1_triangulated_face_set_still_decodes_without_geometric_link() {
+    // the ed1 *_SET form has no geometric_link: get(4) is pnindex (off=0).
+    let src = "DATA;
+#1=COORDINATES_LIST('',4,((0.,0.,0.),(1.,0.,0.),(1.,1.,0.),(0.,1.,0.)));
+#2=TRIANGULATED_FACE_SET('',#1,4,(),(),((1,2,3),(1,3,4)));
+ENDSEC;";
+    let sf = StepFile::parse(src.as_bytes().to_vec()).expect("parse");
+    let (set, _) = tessellate_all(&sf, &["TRIANGULATED_FACE_SET"]);
+    assert_eq!(set.merged().triangle_count(), 2);
+    assert!((total_area(&set.merged()) - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn ap242_complex_triangulated_face_decodes_strips_and_fans() {
+    // a triangle_strip [1,2,3,4] -> 2 triangles (alternating winding, area 1)
+    // and a triangle_fan [1,2,3,4] -> 2 triangles (shared first vertex, area 1):
+    // 4 triangles total, total triangle area 2, exercising both decoders.
+    let src = "DATA;
+#1=COORDINATES_LIST('',4,((0.,0.,0.),(1.,0.,0.),(1.,1.,0.),(0.,1.,0.)));
+#2=COMPLEX_TRIANGULATED_FACE('',#1,4,(),$,(),((1,2,3,4)),((1,2,3,4)));
+ENDSEC;";
+    let sf = StepFile::parse(src.as_bytes().to_vec()).expect("parse");
+    let (set, _) = tessellate_all(&sf, &["COMPLEX_TRIANGULATED_FACE"]);
+    assert_eq!(set.merged().triangle_count(), 4);
+    assert!((total_area(&set.merged()) - 2.0).abs() < 1e-6, "area {}", total_area(&set.merged()));
+}
+
+#[test]
 fn geometric_curve_set_becomes_line_geometry() {
     // a GEOMETRIC_CURVE_SET of datum/reference curves must become a wireframe
     // (line-topology) bucket, not be skipped as an unsupported item.

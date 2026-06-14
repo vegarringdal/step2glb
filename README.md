@@ -352,7 +352,7 @@ let asm = step2glb::hierarchy::build(&sf);
 | Solids    | `MANIFOLD_SOLID_BREP`, `BREP_WITH_VOIDS`, `FACETED_BREP`, `SHELL_BASED_SURFACE_MODEL`, `FACE_BASED_SURFACE_MODEL` |
 | Surfaces  | `PLANE`, `CYLINDRICAL_SURFACE`, `CONICAL_SURFACE`, `SPHERICAL_SURFACE`, `TOROIDAL_SURFACE`, `SURFACE_OF_LINEAR_EXTRUSION`, `SURFACE_OF_REVOLUTION`, `B_SPLINE_SURFACE_WITH_KNOTS` incl. the rational complex-instance form, `RECTANGULAR_TRIMMED_SURFACE` (resolved to its basis surface) (+ near-planar fallback via Newell plane fit) |
 | Curves    | `LINE`, `CIRCLE`, `ELLIPSE`, `HYPERBOLA`, `PARABOLA`, `B_SPLINE_CURVE_WITH_KNOTS` (incl. rational complex form), `POLYLINE`, `TRIMMED_CURVE`, `COMPOSITE_CURVE` (+ `COMPOSITE_CURVE_SEGMENT`), `SURFACE_CURVE`/`SEAM_CURVE` (via 3D curve); a null (`$`) or otherwise unresolved/unsupported edge curve falls back to a straight segment between the edge vertices (and is tallied in the report) |
-| Tessellated | `TRIANGULATED_FACE_SET`, `TRIANGULATED_SURFACE_SET`, `TESSELLATED_SOLID`, `TESSELLATED_SHELL` |
+| Tessellated | `TRIANGULATED_FACE_SET`, `TRIANGULATED_SURFACE_SET`, `TESSELLATED_SOLID`, `TESSELLATED_SHELL`, and the AP242-ed2 `TRIANGULATED_FACE` / `COMPLEX_TRIANGULATED_FACE` (the `geometric_link` slot is auto-detected; `triangle_strips` / `triangle_fans` decoded with GL winding) |
 | Wireframe | `GEOMETRIC_CURVE_SET` / `GEOMETRIC_SET` (datum / reference curves) emitted as glTF LINE primitives; hierarchical output only |
 | Instancing | `MAPPED_ITEM` / `REPRESENTATION_MAP`, NAUO assembly instances             |
 | Presentation | `STYLED_ITEM`, `OVER_RIDING_STYLED_ITEM` -> `COLOUR_RGB` / `DRAUGHTING_PRE_DEFINED_COLOUR` |
@@ -443,6 +443,16 @@ cargo test
       anyway), so near-cusp parameterizations (swept tubes with path kinks,
       helical springs) stop at a sane density instead of exploding to the
       hard cap. The sag bound may go locally unmet right at a cusp.
+- [x] ~~Folded closed (periodic) B-spline coils~~: a coil/spring modelled as one
+      closed-in-u B-spline tube (`per_u = 2π`, `v` along a long multi-turn helix)
+      has a boundary that winds many times around the closed direction. The
+      single-winding seam detector reports `w = 0` (the `|w| > 1` limitation
+      below), so it fell to tess2 and folded ≈50% into triangle soup. Detected
+      structurally — a periodic B-spline whose boundary spans (nearly) the full
+      period in the closed direction *and* the full extent in the other is the
+      whole closed surface — and gridded over the full domain (gridding a closed
+      surface's full period covers it exactly once, fold-free). Checked before
+      the seam-complement path so a stray short end-loop can't mis-route it.
 - [x] ~~Exploding / folded high-aspect wound B-spline strips~~: a structural
       part's wound body is a degree-3 NURBS with an extreme parameter aspect
       ratio (u≈1, v≈16000). It is the *whole* parametric patch, but its boundary
@@ -497,10 +507,13 @@ cargo test
         the *trimmed* surface's parameterization, never used) are irrelevant.
         Curved bases (cylinder, sphere, B-spline) are no longer wrongly flattened
         by the plane fallback.
-  - [ ] **AP242-ed2 tessellated geometry**: `TRIANGULATED_FACE` /
-        `COMPLEX_TRIANGULATED_FACE` (note the extra optional `geometric_link`
-        slot vs the ed1 `*_FACE_SET` we already read) and strip/fan encodings.
-        Make the tessellated reader detect the optional slot by structure.
+  - [x] ~~**AP242-ed2 tessellated geometry**~~: `TRIANGULATED_FACE` /
+        `COMPLEX_TRIANGULATED_FACE`. The ed2 `*_FACE` forms add a `geometric_link`
+        slot between `normals` and `pnindex` (vs the ed1 `*_SET` we already read);
+        it's detected structurally — `pnindex` is always a list, `geometric_link`
+        a ref/`$` — so one reader handles both. `COMPLEX_TRIANGULATED_FACE`'s
+        `triangle_strips` (alternating winding) and `triangle_fans` (shared first
+        vertex) are expanded to triangles with the standard GL conventions.
   - [x] ~~`GEOMETRIC_CURVE_SET` / `GEOMETRIC_SET`~~: wireframe (datum /
         reference curves, e.g. structural part `JLDATUM`/`PLDATUM` lines) is
         emitted as glTF **LINE** primitives (mode 1) — each bounded curve

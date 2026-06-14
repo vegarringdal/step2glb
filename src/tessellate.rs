@@ -161,8 +161,15 @@ pub fn tessellate_item(
             }
             false
         }
-        "TRIANGULATED_FACE_SET" | "TRIANGULATED_SURFACE_SET" => {
-            tessellate_triangulated_set(sf, id, out.bucket(color));
+        // ed1 *_SET forms and the ed2 TRIANGULATED_FACE (geometric_link slot
+        // auto-detected); explicit triangle list
+        "TRIANGULATED_FACE_SET" | "TRIANGULATED_SURFACE_SET" | "TRIANGULATED_FACE" => {
+            tessellate_triangulated_set(sf, id, out.bucket(color), false);
+            true
+        }
+        // ed2 strip/fan-encoded form
+        "COMPLEX_TRIANGULATED_FACE" => {
+            tessellate_triangulated_set(sf, id, out.bucket(color), true);
             true
         }
         "TESSELLATED_SOLID" | "TESSELLATED_SHELL" => {
@@ -973,6 +980,19 @@ fn face_to_mesh(
 
     let contours: Vec<Vec<[f64; 2]>> = loops_uv.into_iter().map(|l| l.uv).collect();
 
+    // A periodic (closed) B-spline whose boundary wraps the whole surface — a
+    // coil tube etc. — covers the full period in the closed direction (winding
+    // around it, which the single-winding detector misses for |w|>1) and the
+    // full extent in the other. The face is then the whole closed surface, so
+    // grid the full domain (fold-free) rather than tess2-fold the multi-winding
+    // contour. Checked before the seam-complement path, which would otherwise
+    // mis-claim it (a stray short loop reads as a non-nesting "bite").
+    if let Some((uu, vv)) = full_wrap_bspline(surf, &contours) {
+        if tessellate_uv_grid(surf, uu, vv, tp, same_sense, mesh) {
+            return Ok(());
+        }
+    }
+
     // Seam-straddling "long way around" faces. On a u-periodic surface a
     // non-winding outer loop can enclose the *short* side of the seam while the
     // face interior is the complement — most of the surface, e.g. a spherical
@@ -1390,6 +1410,44 @@ fn full_domain_bspline(surf: &Surface, contours: &[Vec<[f64; 2]>]) -> Option<((f
         return None;
     }
     if (umax - umin) >= 0.9 * ddu && (vmax - vmin) >= 0.9 * ddv {
+        Some(((u0, u1), (v0, v1)))
+    } else {
+        None
+    }
+}
+
+/// The full knot domain to grid when a *periodic* (closed) B-spline face's
+/// boundary covers the whole surface: it spans (nearly) the full period in the
+/// closed direction — winding around it, which the single-winding detector can
+/// miss (|w|>1) — and the full extent in the other. The face is then the entire
+/// closed tube / strip (e.g. a coil), so grid the full domain (fold-free)
+/// instead of feeding tess2 a multi-winding contour it folds into soup.
+fn full_wrap_bspline(surf: &Surface, contours: &[Vec<[f64; 2]>]) -> Option<((f64, f64), (f64, f64))> {
+    let b = match surf {
+        Surface::BSpline(b) => b,
+        _ => return None,
+    };
+    let (per_u, per_v) = (surf.u_period(), surf.v_period());
+    if per_u.is_none() && per_v.is_none() {
+        return None; // only closed (periodic) surfaces wrap onto themselves
+    }
+    let ((u0, u1), (v0, v1)) = b.domain();
+    let (mut umin, mut umax, mut vmin, mut vmax) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    for c in contours {
+        for p in c {
+            umin = umin.min(p[0]);
+            umax = umax.max(p[0]);
+            vmin = vmin.min(p[1]);
+            vmax = vmax.max(p[1]);
+        }
+    }
+    let (ddu, ddv) = ((u1 - u0).abs(), (v1 - v0).abs());
+    if ddu < 1e-12 || ddv < 1e-12 {
+        return None;
+    }
+    let u_full = (umax - umin) >= 0.9 * per_u.unwrap_or(ddu);
+    let v_full = (vmax - vmin) >= 0.9 * per_v.unwrap_or(ddv);
+    if u_full && v_full {
         Some(((u0, u1), (v0, v1)))
     } else {
         None
@@ -2007,7 +2065,15 @@ fn refine_uv(
 
 // ------------------------------------------------- AP242 tessellated geometry
 
-fn tessellate_triangulated_set(sf: &StepFile, id: u32, mesh: &mut TriMesh) {
+/// AP242 tessellated geometry: the ed1 `TRIANGULATED_FACE_SET` / `_SURFACE_SET`
+/// and the ed2 `TRIANGULATED_FACE` / `COMPLEX_TRIANGULATED_FACE`. Vertices come
+/// from a `COORDINATES_LIST`; indices reference it 1-based, directly or through
+/// the optional `pnindex` indirection. The ed2 `*_FACE` forms insert a
+/// `geometric_link` (a ref/`$`) between `normals` and `pnindex`; since `pnindex`
+/// is always a list, the one-slot shift is detected by type. `complex` decodes
+/// `triangle_strips` + `triangle_fans` (standard GL winding) instead of an
+/// explicit triangle list.
+fn tessellate_triangulated_set(sf: &StepFile, id: u32, mesh: &mut TriMesh, complex: bool) {
     let p = match sf.params(id) {
         Some(p) => p,
         None => return,
@@ -2034,21 +2100,14 @@ fn tessellate_triangulated_set(sf: &StepFile, id: u32, mesh: &mut TriMesh) {
             .collect(),
         None => return,
     };
+    // 0 for the ed1 *_SET forms (get(4) = pnindex, a list); 1 for the ed2
+    // *_FACE forms whose get(4) is the geometric_link (a ref/$, not a list).
+    let off = usize::from(!p.get(4).is_some_and(|v| v.as_list().is_some()));
     let pnindex: Vec<u32> = p
-        .get(4)
+        .get(4 + off)
         .and_then(|v| v.as_list())
-        .map(|l| {
-            l.iter()
-                .filter_map(|v| v.as_i64())
-                .map(|v| v as u32)
-                .collect()
-        })
+        .map(|l| l.iter().filter_map(|v| v.as_i64()).map(|v| v as u32).collect())
         .unwrap_or_default();
-    let tris = match p.get(5).and_then(|v| v.as_list()) {
-        Some(t) => t,
-        None => return,
-    };
-
     let map_idx = |i: u32| -> Option<u32> {
         let i = i.checked_sub(1)?; // STEP is 1-based
         let pi = if pnindex.is_empty() {
@@ -2056,11 +2115,19 @@ fn tessellate_triangulated_set(sf: &StepFile, id: u32, mesh: &mut TriMesh) {
         } else {
             pnindex.get(i as usize)?.checked_sub(1)?
         };
-        if (pi as usize) < pts.len() {
-            Some(pi)
-        } else {
-            None
-        }
+        ((pi as usize) < pts.len()).then_some(pi)
+    };
+    // each sublist of (1-based) point indices in slot `slot` (strips/fans/tris)
+    let lists = |slot: usize| -> Vec<Vec<u32>> {
+        p.get(slot)
+            .and_then(|v| v.as_list())
+            .map(|ls| {
+                ls.iter()
+                    .filter_map(|s| s.as_list())
+                    .map(|s| s.iter().filter_map(|v| v.as_i64()).map(|v| v as u32).collect())
+                    .collect()
+            })
+            .unwrap_or_default()
     };
 
     let base = mesh.positions.len() as u32 / 3;
@@ -2068,22 +2135,39 @@ fn tessellate_triangulated_set(sf: &StepFile, id: u32, mesh: &mut TriMesh) {
         mesh.push_vertex(*pnt, V3::ZERO);
     }
     let istart = mesh.indices.len();
-    for t in tris {
-        if let Some(t) = t.as_list() {
-            if t.len() >= 3 {
-                let idx: Option<Vec<u32>> = t
-                    .iter()
-                    .take(3)
-                    .map(|v| v.as_i64().map(|v| v as u32).and_then(map_idx))
-                    .collect();
-                if let Some(idx) = idx {
-                    mesh.indices.push(base + idx[0]);
-                    mesh.indices.push(base + idx[1]);
-                    mesh.indices.push(base + idx[2]);
+    let mut idx: Vec<u32> = Vec::new();
+    let mut emit = |a: u32, b: u32, c: u32| {
+        if let (Some(a), Some(b), Some(c)) = (map_idx(a), map_idx(b), map_idx(c)) {
+            idx.extend([base + a, base + b, base + c]);
+        }
+    };
+    if complex {
+        // triangle_strips (slot 5+off): k-th triangle alternates winding so the
+        // strip stays consistently oriented (GL_TRIANGLE_STRIP)
+        for s in lists(5 + off) {
+            for k in 0..s.len().saturating_sub(2) {
+                if k % 2 == 0 {
+                    emit(s[k], s[k + 1], s[k + 2]);
+                } else {
+                    emit(s[k + 1], s[k], s[k + 2]);
                 }
             }
         }
+        // triangle_fans (slot 6+off): every triangle shares the first vertex
+        for f in lists(6 + off) {
+            for k in 1..f.len().saturating_sub(1) {
+                emit(f[0], f[k], f[k + 1]);
+            }
+        }
+    } else {
+        for t in lists(5 + off) {
+            if t.len() >= 3 {
+                emit(t[0], t[1], t[2]);
+            }
+        }
     }
+    drop(emit);
+    mesh.indices.extend(idx);
     mesh.compute_missing_normals(base as usize, istart);
 }
 
@@ -2356,6 +2440,53 @@ mod tests {
             "a non-rectangular sub-region must not be grid-filled"
         );
         assert!(mesh.indices.is_empty(), "rejected gate must not emit geometry");
+    }
+
+    #[test]
+    fn full_wrap_grids_a_closed_bspline_covering_its_domain() {
+        use crate::geom::BSplineSurface;
+        // a closed-in-u B-spline tube: deg 1 around (4 points), deg 3 along v
+        let (nu, nv, deg_v) = (4usize, 6usize, 3usize);
+        let mut cps = Vec::new();
+        for k in 0..nv {
+            for iu in 0..nu {
+                let a = iu as f64 / nu as f64 * std::f64::consts::TAU;
+                cps.push(v3(2.0 * a.cos(), 2.0 * a.sin(), 3.0 * k as f64));
+            }
+        }
+        let mut knots_v = vec![0.0; deg_v + 1];
+        for k in 1..(nv - deg_v) {
+            knots_v.push(k as f64);
+        }
+        knots_v.extend(std::iter::repeat_n((nv - deg_v) as f64, deg_v + 1));
+        let s = Surface::BSpline(
+            BSplineSurface {
+                deg_u: 1,
+                deg_v,
+                nu,
+                nv,
+                cps,
+                weights: None,
+                knots_u: vec![0.0, 1.0, 2.0, 3.0, 4.0],
+                knots_v,
+                closed_u: true,
+                closed_v: false,
+                size: 0.0,
+            }
+            .finish(),
+        );
+        assert!(s.u_period().is_some(), "closed_u surface is periodic in u");
+        let ((u0, u1), (v0, v1)) = domain(&s);
+        // a boundary covering the whole domain (the full tube) is a full wrap
+        let full = vec![vec![[u0, v0], [u1, v0], [u1, v1], [u0, v1]]];
+        assert!(full_wrap_bspline(&s, &full).is_some());
+        // a small corner region is not a full wrap (would over-fill the rest)
+        let part = vec![vec![
+            [u0, v0],
+            [u0 + 0.1 * (u1 - u0), v0],
+            [u0, v0 + 0.1 * (v1 - v0)],
+        ]];
+        assert!(full_wrap_bspline(&s, &part).is_none());
     }
 
     #[test]
