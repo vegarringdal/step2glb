@@ -609,7 +609,10 @@ fn parse_value(s: &[u8], i: usize) -> (P, usize) {
             }
             let txt: String = s[i..j].iter().map(|b| *b as char).collect();
             if isf {
-                (P::F(txt.parse().unwrap_or(0.0)), j)
+                // a malformed or overflowing literal (e.g. `1E999` parses to ∞)
+                // must not seed a non-finite coordinate into the geometry kernel
+                let v: f64 = txt.parse().unwrap_or(0.0);
+                (P::F(if v.is_finite() { v } else { 0.0 }), j)
             } else {
                 (P::I(txt.parse().unwrap_or(0)), j)
             }
@@ -678,6 +681,23 @@ END-ISO-10303-21;
         assert_eq!(l[0].as_f64(), Some(1.0));
         assert_eq!(l[1].as_f64(), Some(0.25));
         assert_eq!(l[2].as_f64(), Some(-3.0));
+    }
+
+    #[test]
+    fn overflowing_numeric_literals_are_coerced_finite() {
+        // `1E999` overflows f64 to +∞ on parse; the indexer must clamp it so a
+        // malformed file can never seed a non-finite coordinate into geometry
+        let sf = parse(
+            "DATA;\n#1=CARTESIAN_POINT('',(1E999,-1.0E400,3.));\nENDSEC;",
+        );
+        let p = sf.params(1).unwrap();
+        let coords = p[1].as_list().unwrap();
+        assert_eq!(coords[0].as_f64(), Some(0.0), "1E999 must clamp to 0");
+        assert_eq!(coords[1].as_f64(), Some(0.0), "-1E400 must clamp to 0");
+        assert_eq!(coords[2].as_f64(), Some(3.0), "valid value untouched");
+        for c in coords {
+            assert!(c.as_f64().unwrap().is_finite());
+        }
     }
 
     #[test]

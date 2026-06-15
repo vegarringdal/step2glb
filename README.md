@@ -365,7 +365,7 @@ let asm = step2glb::hierarchy::build(&sf);
 cargo test
 ```
 
-- **Unit tests** (in each module, 43): Part-21 lexing/param parsing edge
+- **Unit tests** (in each module, 56): Part-21 lexing/param parsing edge
   cases (escaped quotes, comments, complex instances, typed params),
   entity-source reconstruction + reference-closure round-trip (the
   `--debug-print` machinery),
@@ -376,6 +376,14 @@ cargo test
   STYLED_ITEM color-chain resolution, mesh welding/degenerate
   removal/hashing, GLB container layout, materials and JSON content, merged
   draw-range/id-hierarchy extras.
+- **Property tests** (`tests/proptest_math.rs`, via `proptest`): the geometry kernel
+  is hand-rolled, so thousands of random surfaces, curves and query points are
+  thrown at the public entry points to prove invariants no single example can —
+  NURBS curve/surface evaluation, seeded-Newton and analytic (u,v) inversion
+  (including adversarial continuity hints), and closed-form round-trips all stay
+  **finite (never NaN/∞), never panic, and terminate** (every loop already caps
+  its iteration count). The parser clamps overflowing literals (`1E999` → `0`) so
+  a malformed file cannot seed a non-finite coordinate in the first place.
 - **Integration tests** (`tests/integration.rs`) over STEP fixtures in
   `tests/fixtures/`:
   - `triangle.step` — minimal planar `ADVANCED_FACE`: exact area, normal
