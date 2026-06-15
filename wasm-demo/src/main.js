@@ -11,6 +11,27 @@ const sampleBtn = document.getElementById('sample');
 const fileInput = document.getElementById('file');
 const downloadBtn = document.getElementById('download');
 const infoEl = document.getElementById('info');
+const deflEl = document.getElementById('deflection');
+const deflValEl = document.getElementById('deflVal');
+const maxAngleEl = document.getElementById('maxangle');
+const maxAngleValEl = document.getElementById('maxangleVal');
+const yupEl = document.getElementById('yup');
+const normalsEl = document.getElementById('normals');
+const mergedEl = document.getElementById('merged');
+const cleanupEl = document.getElementById('cleanup');
+const memEl = document.getElementById('mem');
+const memValEl = document.getElementById('memVal');
+
+// live-update the slider read-outs
+deflEl.addEventListener('input', () => {
+  deflValEl.textContent = Number(deflEl.value).toFixed(2);
+});
+maxAngleEl.addEventListener('input', () => {
+  maxAngleValEl.textContent = maxAngleEl.value;
+});
+memEl.addEventListener('input', () => {
+  memValEl.textContent = memEl.value;
+});
 
 const worker = new Worker(new URL('./worker.js', import.meta.url), {
   type: 'module',
@@ -53,19 +74,40 @@ async function convert(displayName, bytes) {
   downloadBtn.disabled = true;
   sampleBtn.disabled = true;
   infoEl.textContent = '';
+  viewer.src = ''; // clear the old model from the canvas before a new run
   statusEl.textContent = `staging ${displayName}…`;
   await cleanup();
   const inputPath = await writeUpload(bytes);
   const outputPath = `${crypto.randomUUID()}.glb`;
   current = { inputPath, outputPath, displayName };
-  statusEl.textContent = `converting ${displayName}…`;
-  worker.postMessage({ inputPath, outputPath, displayName });
+  const opts = {
+    deflectionMm: Number(deflEl.value),
+    maxAngleDeg: Number(maxAngleEl.value),
+    yUp: yupEl.checked,
+    keepNormals: normalsEl.checked,
+    merged: mergedEl.checked,
+    cleanup: cleanupEl.checked,
+  };
+  // above the memory ceiling → stream input/output/temp through OPFS sync
+  // handles (low memory); below it → convert all in RAM (faster).
+  const streaming = bytes.length > Number(memEl.value) * 1024 * 1024;
+  statusEl.textContent = `converting ${displayName}… (${
+    streaming ? 'streaming via OPFS' : 'in memory'
+  })`;
+  worker.postMessage({ inputPath, outputPath, displayName, opts, streaming });
 }
 
 worker.onmessage = async (e) => {
   const m = e.data;
   if (m.ready) {
     statusEl.textContent = `${m.version} — ready`;
+    return;
+  }
+  // progress ticks arrive during a (blocked) streaming conversion
+  if (m.progress) {
+    const { done, total } = m.progress;
+    const pct = total ? Math.round((100 * done) / total) : 0;
+    statusEl.textContent = `converting ${current?.displayName ?? ''}… ${pct}% (${done}/${total})`;
     return;
   }
   busy = false;

@@ -7,7 +7,10 @@
 //! touches, and the resulting `P` values are dropped right after use.
 //! No DOM of the whole file is ever materialized.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
+
+use crate::io::InputHandle;
 
 /// One indexed entity instance. 16 bytes.
 #[derive(Clone, Copy)]
@@ -99,16 +102,26 @@ enum Source {
     Owned(Vec<u8>),
     #[cfg(feature = "mmap")]
     Mmap(memmap2::Mmap),
+    /// Ranged reads through a handle (OPFS sync handle, a callback bridge, …):
+    /// the bytes are never held contiguously. The index is built with a sliding
+    /// window and entity parameters are read by range on demand.
+    Reader(Box<dyn InputHandle>),
 }
 
 impl Source {
+    /// The contiguous backing slice — only valid for in-memory sources. A
+    /// `Reader` has no contiguous slice (returns empty); its bytes are obtained
+    /// by range via [`StepFile::entity_bytes`].
     fn as_slice(&self) -> &[u8] {
         match self {
-            Source::Empty => &[],
             Source::Owned(v) => v,
             #[cfg(feature = "mmap")]
             Source::Mmap(m) => &m[..],
+            _ => &[],
         }
+    }
+    fn is_reader(&self) -> bool {
+        matches!(self, Source::Reader(_))
     }
 }
 
@@ -129,22 +142,12 @@ impl StepFile {
         Self::from_source(Source::Owned(data))
     }
 
-    /// Read the whole input through a [`crate::io::InputHandle`] into RAM and
-    /// parse it — the path the wasm / C-ABI shells use (e.g. an OPFS sync
-    /// handle), where there is no borrowable backing to map.
-    pub fn from_input(input: &dyn crate::io::InputHandle) -> Result<StepFile, String> {
-        let size = input.size() as usize;
-        let mut data = vec![0u8; size];
-        let mut off = 0usize;
-        while off < size {
-            match input.read_at(off as u64, &mut data[off..]) {
-                Ok(0) => break,
-                Ok(n) => off += n,
-                Err(e) => return Err(format!("input read failed: {e}")),
-            }
-        }
-        data.truncate(off);
-        Self::parse(data)
+    /// Parse from a ranged input handle (an OPFS sync handle, a callback
+    /// bridge, …) **without ever holding the whole file**: the index is built
+    /// with a sliding window over the handle and entity parameters are read by
+    /// range on demand. The path the wasm / C-ABI shells use.
+    pub fn from_input(input: Box<dyn InputHandle>) -> Result<StepFile, String> {
+        Self::from_source(Source::Reader(input))
     }
 
     /// Memory-map a STEP file from disk and parse it — only touched pages are
@@ -178,14 +181,33 @@ impl StepFile {
         Ok(sf)
     }
 
-    /// The raw backing bytes (owned buffer or memory map).
-    fn raw(&self) -> &[u8] {
-        self.source.as_slice()
+    /// Total byte length of the input.
+    pub fn byte_len(&self) -> usize {
+        match &self.source {
+            Source::Reader(input) => input.size() as usize,
+            s => s.as_slice().len(),
+        }
     }
 
-    /// Size of the backing STEP bytes.
-    pub fn byte_len(&self) -> usize {
-        self.raw().len()
+    /// Bytes of the range `[start, end)`: borrowed for an in-memory source
+    /// (zero-copy), read into an owned buffer for a `Reader` (ranged read on
+    /// demand — the whole file is never materialized).
+    fn entity_bytes(&self, start: usize, end: usize) -> Cow<'_, [u8]> {
+        if let Source::Reader(input) = &self.source {
+            let len = end.saturating_sub(start);
+            let mut buf = vec![0u8; len];
+            let mut off = 0usize;
+            while off < len {
+                match input.read_at((start + off) as u64, &mut buf[off..]) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => off += n,
+                }
+            }
+            buf.truncate(off);
+            Cow::Owned(buf)
+        } else {
+            Cow::Borrowed(&self.source.as_slice()[start..end])
+        }
     }
 
     pub fn type_id(&self, name: &str) -> Option<u32> {
@@ -226,10 +248,20 @@ impl StepFile {
     // ---------------------------------------------------------------- index
 
     fn index(&mut self) -> Result<(), String> {
-        // Take the source out so the scan can borrow its bytes while the index
-        // maps are filled (`intern` mutates `self`); restored at the end.
+        // A Reader source has no contiguous buffer: index it with a sliding
+        // window over the handle (never holds the whole file).
+        if self.source.is_reader() {
+            return self.index_streaming();
+        }
+        // In-memory: take the source out so the scan can borrow its bytes while
+        // the index maps are filled (`intern` mutates `self`); restored at end.
         let src = std::mem::take(&mut self.source);
-        let data = src.as_slice();
+        let res = self.index_slice(src.as_slice());
+        self.source = src;
+        res
+    }
+
+    fn index_slice(&mut self, data: &[u8]) -> Result<(), String> {
         let n = data.len();
         let mut i;
 
@@ -306,7 +338,93 @@ impl StepFile {
             i += 1;
         }
 
-        self.source = src;
+        Ok(())
+    }
+
+    /// Index a `Reader` source with a sliding window: read chunks through the
+    /// handle, scan entities with the same lexer, grow the window when a record
+    /// spans the buffer end, and drop the consumed prefix after each entity so
+    /// peak memory is ~one entity + a chunk — never the whole file.
+    fn index_streaming(&mut self) -> Result<(), String> {
+        let input = match std::mem::take(&mut self.source) {
+            Source::Reader(r) => r,
+            other => {
+                self.source = other;
+                return Ok(());
+            }
+        };
+        let mut w = Window::new(input.as_ref());
+
+        // HEADER; / DATA; live at the very top; find them from offset 0.
+        let header_start = w.find_kw_from_start(b"HEADER;").unwrap_or(0);
+        let data_start = match w.find_kw_from_start(b"DATA;") {
+            Some(d) => d,
+            None => {
+                self.source = Source::Reader(input);
+                return Err("no DATA; section found".into());
+            }
+        };
+        self.header_range = (header_start, data_start);
+        let mut i = data_start + 5;
+        let total = w.total;
+
+        while i < total {
+            i = w.skip_ws_comments(i);
+            if i >= total {
+                break;
+            }
+            if w.byte(i) != Some(b'#') {
+                if w.starts_with_ci(i, b"ENDSEC") {
+                    break;
+                }
+                i += 1;
+                continue;
+            }
+            i += 1;
+            let (id, ni) = w.parse_uint(i);
+            i = w.skip_ws_comments(ni);
+            if i >= total || w.byte(i) != Some(b'=') {
+                i = w.find_byte(i, b';') + 1;
+                continue;
+            }
+            i = w.skip_ws_comments(i + 1);
+
+            let (ty, pstart, pend, after) = if w.byte(i) == Some(b'(') {
+                let close = w.match_paren(i)?;
+                (self.intern(TYPE_COMPLEX), i + 1, close, close + 1)
+            } else {
+                let ts = i;
+                while w.byte(i).is_some_and(is_ident) {
+                    i += 1;
+                }
+                let tname = w.ascii_upper(ts, i);
+                let j = w.skip_ws_comments(i);
+                if w.byte(j) != Some(b'(') {
+                    i = w.find_byte(i, b';') + 1;
+                    self.warnings
+                        .push(format!("#{}: malformed record skipped", id));
+                    continue;
+                }
+                let close = w.match_paren(j)?;
+                (self.intern(&tname), j + 1, close, close + 1)
+            };
+
+            self.entities.insert(
+                id,
+                EntityRec {
+                    ty,
+                    start: pstart as u32,
+                    end: pend as u32,
+                },
+            );
+            self.by_type.entry(ty).or_default().push(id);
+
+            i = w.find_byte(after, b';') + 1;
+            // free everything before the next record
+            w.advance_base(i);
+        }
+
+        self.source = Source::Reader(input);
         Ok(())
     }
 
@@ -314,20 +432,21 @@ impl StepFile {
 
     /// Lazily parse the parameter list of a simple entity.
     pub fn params(&self, id: u32) -> Option<Vec<P>> {
-        let rec = self.entities.get(&id)?;
-        let slice = &self.raw()[rec.start as usize..rec.end as usize];
-        Some(parse_param_list(slice))
+        let rec = *self.entities.get(&id)?;
+        let bytes = self.entity_bytes(rec.start as usize, rec.end as usize);
+        Some(parse_param_list(&bytes))
     }
 
     /// For complex (multi-leaf) instances: return the params of the leaf with
     /// the given name, e.g. `B_SPLINE_SURFACE` inside a rational surface combo.
     /// `name_contains`: leaf type must contain this substring.
     pub fn complex_leaf(&self, id: u32, name_contains: &str) -> Option<Vec<P>> {
-        let rec = self.entities.get(&id)?;
+        let rec = *self.entities.get(&id)?;
         if self.type_name(rec.ty) != TYPE_COMPLEX {
             return None;
         }
-        let slice = &self.raw()[rec.start as usize..rec.end as usize];
+        let bytes = self.entity_bytes(rec.start as usize, rec.end as usize);
+        let slice = &bytes[..];
         let mut i = 0usize;
         let n = slice.len();
         while i < n {
@@ -367,7 +486,8 @@ impl StepFile {
             Some(r) if self.type_name(r.ty) == TYPE_COMPLEX => *r,
             _ => return out,
         };
-        let slice = &self.raw()[rec.start as usize..rec.end as usize];
+        let bytes = self.entity_bytes(rec.start as usize, rec.end as usize);
+        let slice = &bytes[..];
         let mut i = 0usize;
         let n = slice.len();
         while i < n {
@@ -418,18 +538,17 @@ impl StepFile {
 
     /// Raw bytes of the HEADER section (for unit sniffing etc.)
     #[allow(dead_code)]
-    pub fn header(&self) -> &[u8] {
-        &self.raw()[self.header_range.0..self.header_range.1]
+    pub fn header(&self) -> Cow<'_, [u8]> {
+        self.entity_bytes(self.header_range.0, self.header_range.1)
     }
 
     /// Reconstruct the Part-21 source line for one entity from its indexed
     /// byte range: `#id=TYPE(params);`, or `#id=(LEAF1(..) LEAF2(..));` for a
     /// complex instance. Used by `--debug-print` to re-emit failing faces.
     pub fn entity_source(&self, id: u32) -> Option<String> {
-        let rec = self.entities.get(&id)?;
-        let body = std::str::from_utf8(&self.raw()[rec.start as usize..rec.end as usize])
-            .ok()?
-            .trim();
+        let rec = *self.entities.get(&id)?;
+        let bytes = self.entity_bytes(rec.start as usize, rec.end as usize);
+        let body = std::str::from_utf8(&bytes).ok()?.trim();
         let ty = self.entity_type(id)?;
         Some(if ty == TYPE_COMPLEX {
             format!("#{}=({});", id, body)
@@ -443,10 +562,11 @@ impl StepFile {
     /// records without re-parsing the value tree.
     pub fn entity_refs(&self, id: u32) -> Vec<u32> {
         let rec = match self.entities.get(&id) {
-            Some(r) => r,
+            Some(r) => *r,
             None => return Vec::new(),
         };
-        let body = &self.raw()[rec.start as usize..rec.end as usize];
+        let bytes = self.entity_bytes(rec.start as usize, rec.end as usize);
+        let body = &bytes[..];
         let mut out = Vec::new();
         let mut i = 0;
         while i < body.len() {
@@ -598,6 +718,166 @@ fn match_paren(data: &[u8], open: usize) -> Result<usize, String> {
         }
     }
     Err("unbalanced parentheses".into())
+}
+
+// ----------------------------------------------------- streaming index window
+
+/// A sliding read window over an [`InputHandle`], used to index a `Reader`
+/// source without ever holding the whole file. It buffers bytes
+/// `[base, base + buf.len())`, grows on demand, and drops the consumed prefix
+/// via [`Window::advance_base`], so peak memory is ~one entity + a chunk.
+///
+/// The non-resumable slice lexers (`skip_ws_comments`, `match_paren`,
+/// `find_kw`) are re-run from a safe start with a grown window when a record
+/// spans the buffer end — correct because each is a pure function of the bytes
+/// at its start offset.
+struct Window<'a> {
+    input: &'a dyn InputHandle,
+    total: usize,
+    base: usize,
+    buf: Vec<u8>,
+}
+
+const WIN_CHUNK: usize = 64 * 1024;
+
+impl<'a> Window<'a> {
+    fn new(input: &'a dyn InputHandle) -> Window<'a> {
+        let total = input.size() as usize;
+        let mut w = Window {
+            input,
+            total,
+            base: 0,
+            buf: Vec::new(),
+        };
+        w.grow();
+        w
+    }
+
+    /// Append the next chunk; returns false at EOF.
+    fn grow(&mut self) -> bool {
+        let have = self.base + self.buf.len();
+        if have >= self.total {
+            return false;
+        }
+        let want = (self.total - have).min(WIN_CHUNK);
+        let old = self.buf.len();
+        self.buf.resize(old + want, 0);
+        let mut got = 0;
+        while got < want {
+            match self
+                .input
+                .read_at((have + got) as u64, &mut self.buf[old + got..])
+            {
+                Ok(0) | Err(_) => break,
+                Ok(n) => got += n,
+            }
+        }
+        self.buf.truncate(old + got);
+        got > 0
+    }
+
+    fn at_eof_window(&self) -> bool {
+        self.base + self.buf.len() >= self.total
+    }
+
+    /// Grow until absolute `abs` is buffered (or EOF).
+    fn ensure(&mut self, abs: usize) {
+        while self.base + self.buf.len() <= abs && self.grow() {}
+    }
+
+    /// Drop buffered bytes before `abs` to bound memory.
+    fn advance_base(&mut self, abs: usize) {
+        if abs > self.base {
+            let cut = (abs - self.base).min(self.buf.len());
+            self.buf.drain(0..cut);
+            self.base += cut;
+        }
+    }
+
+    fn rel(&self, abs: usize) -> usize {
+        abs - self.base
+    }
+
+    fn byte(&mut self, abs: usize) -> Option<u8> {
+        self.ensure(abs);
+        self.buf.get(abs - self.base).copied()
+    }
+
+    fn starts_with_ci(&mut self, abs: usize, kw: &[u8]) -> bool {
+        self.ensure(abs + kw.len());
+        starts_with_ci(&self.buf, self.rel(abs), kw)
+    }
+
+    fn parse_uint(&mut self, abs: usize) -> (u32, usize) {
+        self.ensure(abs + 24); // a decimal id is short
+        let (v, rel) = parse_uint(&self.buf, self.rel(abs));
+        (v, self.base + rel)
+    }
+
+    fn ascii_upper(&mut self, start: usize, end: usize) -> String {
+        self.ensure(end);
+        ascii_upper(&self.buf[self.rel(start)..self.rel(end)])
+    }
+
+    fn skip_ws_comments(&mut self, abs: usize) -> usize {
+        loop {
+            self.ensure(abs + WIN_CHUNK);
+            let r = skip_ws_comments(&self.buf, self.rel(abs));
+            // r within the buffer (stopped at a real char) or no more file
+            if r < self.buf.len() || self.at_eof_window() {
+                return self.base + r;
+            }
+            if !self.grow() {
+                return self.base + r;
+            }
+        }
+    }
+
+    fn match_paren(&mut self, open: usize) -> Result<usize, String> {
+        loop {
+            self.ensure(open + WIN_CHUNK);
+            match match_paren(&self.buf, self.rel(open)) {
+                Ok(close_rel) => return Ok(self.base + close_rel),
+                Err(e) => {
+                    if self.at_eof_window() {
+                        return Err(e);
+                    }
+                    self.grow();
+                }
+            }
+        }
+    }
+
+    /// First byte `b` at/after `abs` (dumb scan to reach the record terminator
+    /// `;` after a matched body); returns `total` if not found.
+    fn find_byte(&mut self, abs: usize, b: u8) -> usize {
+        let mut a = abs;
+        loop {
+            self.ensure(a + WIN_CHUNK);
+            let mut k = self.rel(a);
+            while k < self.buf.len() && self.buf[k] != b {
+                k += 1;
+            }
+            if k < self.buf.len() || self.at_eof_window() {
+                return self.base + k;
+            }
+            a = self.base + k;
+            self.grow();
+        }
+    }
+
+    /// `find_kw` from offset 0 (only called before any `advance_base`, so
+    /// `base == 0`), growing until found or EOF.
+    fn find_kw_from_start(&mut self, kw: &[u8]) -> Option<usize> {
+        loop {
+            if let Some(r) = find_kw(&self.buf, 0, kw) {
+                return Some(r);
+            }
+            if !self.grow() {
+                return None;
+            }
+        }
+    }
 }
 
 // ------------------------------------------------------------- param parse
@@ -760,17 +1040,73 @@ END-ISO-10303-21;
         assert_eq!(l[2].as_f64(), Some(-3.0));
     }
 
+    /// An InputHandle that serves a buffer but caps every read at `chunk`
+    /// bytes, forcing the streaming indexer's window to grow and to stitch
+    /// records that span chunk boundaries.
+    struct ChunkedHandle {
+        data: Vec<u8>,
+        chunk: usize,
+    }
+    impl crate::io::InputHandle for ChunkedHandle {
+        fn size(&self) -> u64 {
+            self.data.len() as u64
+        }
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+            let start = (offset as usize).min(self.data.len());
+            let n = buf.len().min(self.chunk).min(self.data.len() - start);
+            buf[..n].copy_from_slice(&self.data[start..start + n]);
+            Ok(n)
+        }
+    }
+
     #[test]
-    fn from_input_handle_matches_owned_parse() {
-        // a Vec<u8> is an InputHandle; parsing through the handle (the wasm /
-        // capi path) must produce the same index as parsing the owned buffer
-        let src = b"DATA;\n#1=CARTESIAN_POINT('',(1.,2.,3.));\nENDSEC;".to_vec();
-        let via_handle = StepFile::from_input(&src).expect("from_input");
-        let via_owned = StepFile::parse(src.clone()).expect("parse");
-        assert_eq!(via_handle.entities.len(), via_owned.entities.len());
-        assert_eq!(via_handle.entity_type(1), Some("CARTESIAN_POINT"));
-        assert_eq!(via_handle.byte_len(), src.len());
-        assert_eq!(via_handle.params(1).unwrap()[1].as_list().unwrap().len(), 3);
+    fn streaming_index_matches_owned_parse_across_chunk_sizes() {
+        // a file with comments, strings containing ')' and ';', a complex
+        // instance, and varied whitespace — all the things the windowed lexer
+        // must stitch across chunk boundaries
+        let src = b"ISO-10303-21;\nHEADER;\nFILE_NAME('a;b)c','');\nENDSEC;\nDATA;\n\
+                    #1=CARTESIAN_POINT('p',(1.,2.5E-1,-3.));\n\
+                    /* a long comment with ; and ) and ( inside it */\n\
+                    #2 = DIRECTION ( '' , ( 0., 0., 1. ) ) ;\n\
+                    #3=ADVANCED_FACE('it''s }',(#1),#2,.T.);\n\
+                    #4=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.));\n\
+                    ENDSEC;\nEND-ISO-10303-21;\n"
+            .to_vec();
+        let owned = StepFile::parse(src.clone()).expect("owned parse");
+
+        // tiny chunks force window growth / record stitching at every boundary
+        for chunk in [1usize, 2, 3, 7, 16, 64, 4096] {
+            let h = ChunkedHandle {
+                data: src.clone(),
+                chunk,
+            };
+            let sf = StepFile::from_input(Box::new(h)).expect("streaming parse");
+            assert_eq!(sf.byte_len(), src.len(), "chunk {chunk}");
+            assert_eq!(
+                sf.entities.len(),
+                owned.entities.len(),
+                "entity count, chunk {chunk}"
+            );
+            for &id in &[1u32, 2, 3, 4] {
+                assert_eq!(
+                    sf.entity_type(id),
+                    owned.entity_type(id),
+                    "type #{id} chunk {chunk}"
+                );
+            }
+            // ranged param read matches the owned (zero-copy) parse
+            assert_eq!(
+                sf.params(1).unwrap()[1].as_list().unwrap().len(),
+                3,
+                "params #1, chunk {chunk}"
+            );
+            // complex-instance leaf access works through the Reader source too
+            assert!(
+                sf.complex_leaf(4, "SI_UNIT").is_some(),
+                "complex leaf, chunk {chunk}"
+            );
+            assert_eq!(sf.entity_type(4), Some(TYPE_COMPLEX));
+        }
     }
 
     #[test]

@@ -64,6 +64,7 @@ pub fn build(
     asm: &Assembly,
     opts: MergeOptions,
     stats: &mut TessStats,
+    progress: &mut dyn FnMut(u32),
 ) -> (MergedBuilder, usize) {
     let mut base = M4::scale_uniform(opts.unit_scale);
     if opts.rotate_z_up {
@@ -74,6 +75,8 @@ pub fn build(
         asm,
         opts,
         stats,
+        progress,
+        processed: 0,
         cache: HashMap::new(),
         out: MergedBuilder::default(),
         next_id: 1,
@@ -135,6 +138,9 @@ struct Walk<'a, 'b> {
     asm: &'a Assembly,
     opts: MergeOptions,
     stats: &'b mut TessStats,
+    /// per-node progress hook (running count of product nodes visited)
+    progress: &'b mut dyn FnMut(u32),
+    processed: u32,
     /// tessellated once per PRODUCT_DEFINITION; instances clone + transform
     cache: HashMap<u32, Option<MeshSet>>,
     out: MergedBuilder,
@@ -191,6 +197,10 @@ impl Walk<'_, '_> {
         if let Some(cached) = self.cache.get(&pd) {
             return cached.clone();
         }
+        // a cache miss = one unique product actually tessellated (progress is
+        // counted in products, so it never exceeds the product total)
+        self.processed += 1;
+        (self.progress)(self.processed);
         let mut tm = MeshSet::default();
         if let Some(node) = self.asm.products.get(&pd) {
             for &sr in &node.shape_reps {

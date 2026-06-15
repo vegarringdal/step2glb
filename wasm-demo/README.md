@@ -29,6 +29,36 @@ The bundled sample (`src/sample-box-cylinder.stp`) is a `CSG_SOLID`: a 10×10×1
 block with a Ø6 cylinder drilled through it (exercises the BSP mesh boolean).
 You can also pick any `.step`/`.stp` file with the file input.
 
+### Controls
+
+Effective in the browser build today:
+
+- **deflection** (slider, mm) — chordal tolerance; coarser = fewer triangles = faster.
+- **max-angle** (slider, 10–45°) — max chord turn angle; smaller = rounder curves.
+- **Y-up** — rotate Z-up (STEP) to glTF Y-up.
+- **normals** — keep per-vertex normals (off = smaller, viewer flat-shades).
+- **merged** — one node/mesh per color baked to world space vs the hierarchical
+  per-part node tree (instanced, keeps the assembly structure).
+- **cleanup** — rvm-style position weld (drops normals). The mesh *simplify*
+  step needs meshoptimizer, which the wasm build omits, so in the browser this
+  is weld + degenerate-drop only.
+- **memory** (slider, 100–2000 MB) — the ceiling that picks the path: a file
+  **larger** than this streams through OPFS sync handles (input read by range,
+  GLB and geometry spilled to OPFS — low, bounded wasm memory); **smaller** files
+  convert all in RAM (faster). The status line shows which path ran.
+- **progress** — during a streaming conversion Rust reports product-node
+  progress (throttled ~5%); the worker `postMessage`s it and the status line
+  shows `N%`.
+- **Export GLB** — download the result; the OPFS scratch is then deleted.
+- starting a new conversion clears the previous model from the canvas.
+
+How the streaming path maps to the core's three sync handles: the worker builds
+an `Io` object whose `read`/`writeOutput`/`writeTemp`+`readTemp`/`progress`
+methods drive OPFS sync access handles, and `convert_streaming` wires them to
+Rust's `InputHandle` / `OutputHandle` / `TempHandle`. (Full memory *budgeting* —
+splitting the ceiling across input window / output / tessellation — is the
+remaining refinement; today the choice is the binary stream-or-not above.)
+
 ## Prerequisites
 
 - Rust with the `wasm32-unknown-unknown` target:

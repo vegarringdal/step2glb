@@ -23,7 +23,11 @@
 use std::io;
 
 /// Random-access, read-only source of the STEP input.
-pub trait InputHandle {
+// `Send + Sync` so a `StepFile` holding a `Reader` source stays `Sync` for the
+// threaded tessellation path. The in-memory impls satisfy it for free; a wasm
+// OPFS-backed handle is single-threaded and adds an `unsafe impl` (sound on
+// wasm32, which has no real threads).
+pub trait InputHandle: Send + Sync {
     /// Total size of the source in bytes.
     fn size(&self) -> u64;
     /// Read up to `buf.len()` bytes starting at `offset`; returns the number of

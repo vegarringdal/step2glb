@@ -74,12 +74,38 @@
   <body>
     <header>
       <strong>step2glb</strong>
-      <button id="sample">Convert sample (box − cylinder)</button>
-      <label
-        >or pick a .step/.stp:
-        <input id="file" type="file" accept=".step,.stp,.STEP,.STP" />
+      <button id="sample">Sample (box − cylinder)</button>
+      <label><input id="file" type="file" accept=".step,.stp,.STEP,.STP" /></label>
+      <label title="chordal deflection (mm): coarser = fewer triangles = faster">
+        deflection
+        <input id="deflection" type="range" min="0.05" max="5" step="0.05" value="1" />
+        <span id="deflVal">1.00</span> mm
       </label>
-      <button id="download" disabled>Download GLB</button>
+      <label title="max chord turn angle (°): smaller = rounder curves, more triangles">
+        max-angle
+        <input id="maxangle" type="range" min="10" max="45" step="1" value="25" />
+        <span id="maxangleVal">25</span>°
+      </label>
+      <label title="rotate Z-up (STEP) to glTF Y-up"
+        ><input id="yup" type="checkbox" checked /> Y-up</label
+      >
+      <label title="keep per-vertex normals (larger; off = viewer flat-shades)"
+        ><input id="normals" type="checkbox" /> normals</label
+      >
+      <label title="merged: one node/mesh per color baked to world (vs per-part node tree)"
+        ><input id="merged" type="checkbox" checked /> merged</label
+      >
+      <label title="rvm-style position weld (drops normals; simplify needs meshopt, omitted in wasm)"
+        ><input id="cleanup" type="checkbox" /> cleanup</label
+      >
+      <label
+        title="spill geometry to OPFS above this ceiling — takes effect once the streaming temp-handle bridge lands"
+      >
+        memory
+        <input id="mem" type="range" min="100" max="2000" step="100" value="512" />
+        <span id="memVal">512</span> MB
+      </label>
+      <button id="download" disabled>Export GLB</button>
       <span id="status">loading wasm…</span>
     </header>
     <main>

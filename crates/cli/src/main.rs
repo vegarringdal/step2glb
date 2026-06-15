@@ -459,7 +459,7 @@ fn main() {
             simplify: simplify_only(&args),
         };
         let t1 = Instant::now();
-        let (merged, unique) = merge::build(&cx, &asm, opts, &mut stats);
+        let (merged, unique) = merge::build(&cx, &asm, opts, &mut stats, &mut |_| {});
         if merged.bucket_count() == 0 {
             eprintln!("error: no tessellatable geometry found in this file");
             report_unsupported(&stats);
@@ -1191,7 +1191,7 @@ fn write_step_excerpt(sf: &StepFile, ids: &[u32], path: &std::path::Path) {
     );
     let (h0, h1) = sf.header_range;
     if h1 > h0 && h1 <= sf.byte_len() {
-        out.push_str(&String::from_utf8_lossy(sf.header()));
+        out.push_str(&String::from_utf8_lossy(&sf.header()));
         if !out.ends_with('\n') {
             out.push('\n');
         }
@@ -1239,7 +1239,7 @@ fn maybe_write_debug(args: &Args, sf: &StepFile, stats: &TessStats) {
     // original file HEADER (schema + originating system) — small, valuable
     let (h0, h1) = sf.header_range;
     if h1 > h0 && h1 <= sf.byte_len() {
-        out.push_str(&String::from_utf8_lossy(sf.header()));
+        out.push_str(&String::from_utf8_lossy(&sf.header()));
         if !out.ends_with('\n') {
             out.push('\n');
         }

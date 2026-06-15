@@ -34,7 +34,12 @@ pub unsafe extern "C" fn step2glb_convert(
     let input = std::slice::from_raw_parts(step_ptr, step_len).to_vec();
     let mut sink = MemSink::default();
     let mut tmp = MemTemp::default();
-    match convert(&input, &mut sink, &mut tmp, &ConvertOptions::default()) {
+    match convert(
+        Box::new(input),
+        &mut sink,
+        &mut tmp,
+        &ConvertOptions::default(),
+    ) {
         Ok(_) => {
             let mut boxed = sink.0.into_boxed_slice();
             *out_len = boxed.len();

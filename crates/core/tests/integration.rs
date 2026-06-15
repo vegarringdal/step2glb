@@ -1407,7 +1407,7 @@ fn build_merged_with(
         cleanup,
         simplify: None,
     };
-    let (merged, _unique) = merge::build(&cx, &asm, opts, &mut stats);
+    let (merged, _unique) = merge::build(&cx, &asm, opts, &mut stats, &mut |_| {});
     assert!(merged.bucket_count() > 0);
     (glb_json(&merged.write("test")), asm)
 }
@@ -1551,7 +1551,7 @@ fn merged_without_rotation_keeps_z_up() {
         cleanup: None,
         simplify: None,
     };
-    let (merged, _) = merge::build(&cx, &asm, opts, &mut stats);
+    let (merged, _) = merge::build(&cx, &asm, opts, &mut stats, &mut |_| {});
     let json = glb_json(&merged.write("test"));
     let pos_acc = json["meshes"][0]["primitives"][0]["attributes"]["POSITION"]
         .as_u64()
