@@ -64,10 +64,22 @@ pub fn convert_step_to_glb(step_bytes: &[u8]) -> Result<ConvertResult, JsValue> 
     run(step_bytes, &ConvertOptions::default())
 }
 
+// A JS progress sink for the in-RAM path: `report(done, total)` is called as
+// product nodes finish (throttled to ~5% by the core), mirroring the streaming
+// path's `io.progress`. The worker forwards it to the page as a postMessage.
+#[wasm_bindgen]
+extern "C" {
+    pub type Progress;
+    #[wasm_bindgen(method)]
+    fn report(this: &Progress, done: f64, total: f64);
+}
+
 /// Convert with the knobs a viewer exposes. `cleanup` runs the rvm-style
 /// position weld (+ degenerate drop; the simplify step needs meshoptimizer,
 /// which the wasm build omits). `merged` selects the one-mesh-per-color world-
-/// baked layout vs the hierarchical per-part node tree.
+/// baked layout vs the hierarchical per-part node tree. `progress.report(done,
+/// total)` fires as product nodes are processed — the in-RAM counterpart of the
+/// streaming path's `io.progress`, so the UI shows % on this path too.
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub fn convert_step_to_glb_opts(
@@ -78,6 +90,7 @@ pub fn convert_step_to_glb_opts(
     keep_normals: bool,
     cleanup: bool,
     merged: bool,
+    progress: &Progress,
 ) -> Result<ConvertResult, JsValue> {
     let opts = ConvertOptions {
         deflection_mm,
@@ -88,7 +101,20 @@ pub fn convert_step_to_glb_opts(
         merged,
         ..ConvertOptions::default()
     };
-    run(step_bytes, &opts)
+    let mut out = MemSink::default();
+    let mut tmp = MemTemp::default();
+    let report = convert_with_progress(
+        Box::new(step_bytes.to_vec()),
+        &mut out,
+        &mut tmp,
+        &opts,
+        &mut |done, total| progress.report(done as f64, total as f64),
+    )
+    .map_err(|e| JsValue::from_str(&e))?;
+    Ok(ConvertResult {
+        glb: out.0,
+        info: report.to_json(),
+    })
 }
 
 /// Version of the underlying converter, for the demo UI.

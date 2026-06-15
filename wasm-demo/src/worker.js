@@ -100,6 +100,11 @@ async function runStreaming(m, o) {
 
 async function runInRam(m, o) {
   const stepBytes = await readAllSync(m.inputPath);
+  // progress sink: fires as product nodes finish (the core throttles to ~5%),
+  // posted to the page just like the streaming path's io.progress
+  const progress = {
+    report: (done, total) => self.postMessage({ progress: { done, total } }),
+  };
   const result = convert_step_to_glb_opts(
     stepBytes,
     o.deflectionMm ?? 1.0,
@@ -108,6 +113,7 @@ async function runInRam(m, o) {
     o.keepNormals ?? false,
     o.cleanup ?? false,
     o.merged ?? true,
+    progress,
   );
   const glb = result.glb;
   const info = result.info;
