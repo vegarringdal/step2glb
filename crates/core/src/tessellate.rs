@@ -2606,6 +2606,27 @@ mod tests {
     }
 
     #[test]
+    fn patched_tess2_fails_soft_without_panicking() {
+        // Drive the (vendored, fail-soft) tess2 directly — bypassing run_tess2's
+        // catch_unwind — with degenerate / self-intersecting contours that
+        // stress the sweep. The patch must make it return a bool (success or a
+        // clean failure) rather than panicking on a freed region; on wasm a
+        // panic here would abort the whole module.
+        use tess2_rust::{ElementType, Tessellator, WindingRule};
+        let nasty: &[&[f64]] = &[
+            &[0., 0., 1., 1., 1., 0., 0., 1., 0., 0.], // self-intersecting bowtie
+            &[0., 0., 0., 0., 1., 0., 1., 0., 0., 1.], // repeated/coincident verts
+            &[0., 0., 1., 0., 2., 0., 3., 0.],         // fully collinear (zero area)
+        ];
+        for c in nasty {
+            let mut t = Tessellator::new();
+            t.add_contour(2, c);
+            // the assertion is simply that this call returns at all
+            let _ = t.tessellate(WindingRule::Odd, ElementType::Polygons, 3, 2, None);
+        }
+    }
+
+    #[test]
     fn sanitize_contour_drops_zero_length_edges() {
         // a square with a repeated vertex and a closing duplicate
         let c = vec![

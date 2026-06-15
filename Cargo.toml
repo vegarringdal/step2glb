@@ -4,7 +4,16 @@ members = ["crates/core", "crates/cli", "crates/capi", "crates/wasm"]
 # shell is built explicitly for its target:
 #   cargo build -p step2glb-wasm --target wasm32-unknown-unknown
 default-members = ["crates/core", "crates/cli", "crates/capi"]
+# the vendored tess2 fork is pulled in via [patch] below, not as a member, so
+# `cargo fmt/test --all` leave upstream's formatting/tests alone.
+exclude = ["crates/tess2-rust"]
 resolver = "2"
+
+# Use our vendored, fail-soft fork of tess2-rust instead of the crates.io build
+# (so a degenerate contour can't panic-abort the wasm module). See
+# crates/tess2-rust.
+[patch.crates-io]
+tess2-rust = { path = "crates/tess2-rust" }
 
 [workspace.package]
 version = "0.1.0"
