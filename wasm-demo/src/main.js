@@ -80,20 +80,26 @@ async function convert(displayName, bytes) {
   const inputPath = await writeUpload(bytes);
   const outputPath = `${crypto.randomUUID()}.glb`;
   current = { inputPath, outputPath, displayName };
+  // above the memory ceiling → stream input/output/temp through OPFS sync
+  // handles (low memory); below it → convert all in RAM (faster).
+  const streaming = bytes.length > Number(memEl.value) * 1024 * 1024;
+  // merged mode bakes every instance to world space and accumulates one huge
+  // per-color buffer — a doubling realloc of that buffer is what traps a big
+  // assembly. For streaming (big) files force hierarchical: separate per-part
+  // meshes, instances deduped, so no single giant allocation.
+  const merged = mergedEl.checked && !streaming;
   const opts = {
     deflectionMm: Number(deflEl.value),
     maxAngleDeg: Number(maxAngleEl.value),
     yUp: yupEl.checked,
     keepNormals: normalsEl.checked,
-    merged: mergedEl.checked,
+    merged,
     cleanup: cleanupEl.checked,
   };
-  // above the memory ceiling → stream input/output/temp through OPFS sync
-  // handles (low memory); below it → convert all in RAM (faster).
-  const streaming = bytes.length > Number(memEl.value) * 1024 * 1024;
-  statusEl.textContent = `converting ${displayName}… (${
-    streaming ? 'streaming via OPFS' : 'in memory'
-  })`;
+  const mode = streaming
+    ? `streaming via OPFS${mergedEl.checked ? ', hierarchical to bound memory' : ''}`
+    : 'in memory';
+  statusEl.textContent = `converting ${displayName}… (${mode})`;
   worker.postMessage({ inputPath, outputPath, displayName, opts, streaming });
 }
 

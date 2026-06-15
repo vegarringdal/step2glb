@@ -37,6 +37,14 @@ impl ConvertResult {
     }
 }
 
+/// Install the panic hook once, so a wasm abort (a Rust panic, or an
+/// out-of-memory when `memory.grow` fails) surfaces as a readable console
+/// message rather than a bare `unreachable` trap.
+#[wasm_bindgen(start)]
+pub fn start() {
+    console_error_panic_hook::set_once();
+}
+
 fn run(bytes: &[u8], opts: &ConvertOptions) -> Result<ConvertResult, JsValue> {
     let input = bytes.to_vec();
     let mut out = MemSink::default();
