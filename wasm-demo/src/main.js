@@ -21,6 +21,7 @@ const mergedEl = document.getElementById('merged');
 const cleanupEl = document.getElementById('cleanup');
 const memEl = document.getElementById('mem');
 const memValEl = document.getElementById('memVal');
+const memLabel = document.getElementById('memLabel');
 
 // live-update the slider read-outs
 deflEl.addEventListener('input', () => {
@@ -32,6 +33,16 @@ maxAngleEl.addEventListener('input', () => {
 memEl.addEventListener('input', () => {
   memValEl.textContent = memEl.value;
 });
+
+// merged mode is always in-RAM (it can't stream — one buffer per color), so the
+// memory ceiling does not apply: grey out the slider while merged is selected.
+function syncMemEnabled() {
+  const off = mergedEl.checked;
+  memEl.disabled = off;
+  memLabel.style.opacity = off ? '0.5' : '';
+}
+mergedEl.addEventListener('change', syncMemEnabled);
+syncMemEnabled();
 
 // A wasm module's linear memory only ever grows — it is never returned to the
 // OS while the instance lives. So instead of one long-lived worker we spawn a
@@ -105,14 +116,12 @@ async function convert(displayName, bytes) {
   const inputPath = await writeUpload(bytes);
   const outputPath = `${crypto.randomUUID()}.glb`;
   current = { inputPath, outputPath, displayName };
-  // above the memory ceiling → stream input/output/temp through OPFS sync
-  // handles (low memory); below it → convert all in RAM (faster).
-  const streaming = bytes.length > Number(memEl.value) * 1024 * 1024;
-  // merged mode bakes every instance to world space and accumulates one huge
-  // per-color buffer — a doubling realloc of that buffer is what traps a big
-  // assembly. For streaming (big) files force hierarchical: separate per-part
-  // meshes, instances deduped, so no single giant allocation.
-  const merged = mergedEl.checked && !streaming;
+  // merged mode accumulates one huge per-color buffer baked to world space — it
+  // can't stream, so it always runs in RAM and ignores the memory ceiling.
+  // Hierarchical mode spills each mesh's geometry to OPFS as it goes, so above
+  // the ceiling it streams (bounded RAM); below it, all in RAM (faster).
+  const merged = mergedEl.checked;
+  const streaming = !merged && bytes.length > Number(memEl.value) * 1024 * 1024;
   const opts = {
     deflectionMm: Number(deflEl.value),
     maxAngleDeg: Number(maxAngleEl.value),
@@ -122,8 +131,10 @@ async function convert(displayName, bytes) {
     cleanup: cleanupEl.checked,
   };
   const mode = streaming
-    ? `streaming via OPFS${mergedEl.checked ? ', hierarchical to bound memory' : ''}`
-    : 'in memory';
+    ? 'streaming via OPFS (hierarchical, geometry spilled)'
+    : merged
+      ? 'in memory (merged)'
+      : 'in memory (hierarchical)';
   statusEl.textContent = `converting ${displayName}… (${mode})`;
 
   // spawn a throwaway worker for just this conversion; it is terminated (and

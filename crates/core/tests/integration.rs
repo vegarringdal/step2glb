@@ -1071,11 +1071,7 @@ fn glb_roundtrip_of_fixture_geometry() {
     let (mut set, _) = tessellate_all(&sf, &["MANIFOLD_SOLID_BREP"]);
     set.optimize();
 
-    let mut b = glb::GlbBuilder::default();
-    let mi = b.add_mesh(set, "tri".into());
-    let n = b.add_node("root".into(), None, Some(mi));
-    b.root_nodes = vec![n];
-    let bytes = b.write("test");
+    let bytes = one_mesh_glb(set, "tri");
 
     // container sanity
     assert_eq!(&bytes[0..4], b"glTF");
@@ -1360,11 +1356,7 @@ fn styled_item_colors_reach_mesh_buckets_and_glb_materials() {
     assert_eq!(set.parts.len(), 1);
     assert_eq!(set.parts[0].0, Some([1.0, 0.0, 0.0, 1.0]));
 
-    let mut b = glb::GlbBuilder::default();
-    let mi = b.add_mesh(set, "red".into());
-    let n = b.add_node("root".into(), None, Some(mi));
-    b.root_nodes = vec![n];
-    let bytes = b.write("test");
+    let bytes = one_mesh_glb(set, "red");
     let jlen = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
     let json: serde_json::Value = serde_json::from_slice(&bytes[20..20 + jlen]).unwrap();
     let mat = json["meshes"][0]["primitives"][0]["material"]
@@ -1381,6 +1373,22 @@ fn glb_json(bytes: &[u8]) -> serde_json::Value {
     assert_eq!(&bytes[0..4], b"glTF");
     let jlen = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
     serde_json::from_slice(&bytes[20..20 + jlen]).expect("valid GLB JSON")
+}
+
+/// Build a one-mesh, single-root hierarchical GLB and return its bytes. The
+/// streaming builder spills geometry into the temp handle as `add_mesh` runs,
+/// so a `MemTemp` is threaded through and `finish` reads it back.
+fn one_mesh_glb(set: MeshSet, name: &str) -> Vec<u8> {
+    use step2glb::io::{MemSink, MemTemp};
+    let mut tmp = MemTemp::default();
+    let mut out = MemSink::default();
+    let mut b = glb::GlbBuilder::default();
+    let mi = b.add_mesh(set, name.into(), &mut tmp);
+    let n = b.add_node("root".into(), None, Some(mi));
+    b.root_nodes = vec![n];
+    b.finish("test", &mut out, &mut tmp)
+        .expect("in-memory GLB write is infallible");
+    out.0
 }
 
 fn build_merged_with(
@@ -1622,11 +1630,7 @@ fn hierarchical_cleanup_writes_position_only_glb() {
     set.optimize();
     set.cleanup_positions(3, 0.75, 0.0);
 
-    let mut b = glb::GlbBuilder::default();
-    let mi = b.add_mesh(set, "part".into());
-    let n = b.add_node("root".into(), None, Some(mi));
-    b.root_nodes = vec![n];
-    let json = glb_json(&b.write("test"));
+    let json = glb_json(&one_mesh_glb(set, "part"));
 
     let attrs = json["meshes"][0]["primitives"][0]["attributes"]
         .as_object()

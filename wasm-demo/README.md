@@ -37,15 +37,19 @@ Effective in the browser build today:
 - **max-angle** (slider, 10–45°) — max chord turn angle; smaller = rounder curves.
 - **Y-up** — rotate Z-up (STEP) to glTF Y-up.
 - **normals** — keep per-vertex normals (off = smaller, viewer flat-shades).
-- **merged** — one node/mesh per color baked to world space vs the hierarchical
-  per-part node tree (instanced, keeps the assembly structure).
+- **merged** (off by default) — one node/mesh per color baked to world space vs
+  the hierarchical per-part node tree (instanced, keeps the assembly structure).
+  Merged accumulates one buffer per color and **can't stream**, so it always
+  runs in RAM and **disables the memory slider** — leave it off for large files.
 - **cleanup** — rvm-style position weld (drops normals). The mesh *simplify*
   step needs meshoptimizer, which the wasm build omits, so in the browser this
   is weld + degenerate-drop only.
-- **memory** (slider, 100–2000 MB) — the ceiling that picks the path: a file
-  **larger** than this streams through OPFS sync handles (input read by range,
-  GLB and geometry spilled to OPFS — low, bounded wasm memory); **smaller** files
-  convert all in RAM (faster). The status line shows which path ran.
+- **memory** (slider, 100–2000 MB) — the ceiling that picks the path in
+  hierarchical mode: a file **larger** than this streams through OPFS sync
+  handles (input read by range, and each mesh's geometry spilled to OPFS as it
+  is tessellated — low, bounded wasm memory); **smaller** files convert all in
+  RAM (faster). The status line shows which path ran. Disabled under **merged**
+  (which never streams).
 - **progress** — during a streaming conversion Rust reports product-node
   progress (throttled ~5%); the worker `postMessage`s it and the status line
   shows `N%`.

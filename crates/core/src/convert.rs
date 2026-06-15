@@ -242,6 +242,8 @@ pub fn convert_with_progress(
                 .map_err(|e| e.to_string())?;
             n
         } else {
+            // geometry spills into `tmp` as meshes are tessellated, so peak RAM
+            // is one mesh — not the whole model; `finish` reads it back.
             let builder = build_hierarchical(
                 &cx,
                 &asm,
@@ -250,10 +252,11 @@ pub fn convert_with_progress(
                 output_scale,
                 &mut stats,
                 &mut on_node,
+                tmp,
             );
-            let n = builder.meshes.len();
+            let n = builder.mesh_count();
             builder
-                .write_stream(&opts.generator, out, tmp)
+                .finish(&opts.generator, out, tmp)
                 .map_err(|e| e.to_string())?;
             n
         }
@@ -300,6 +303,7 @@ fn build_hierarchical(
     output_scale: f64,
     stats: &mut TessStats,
     progress: &mut dyn FnMut(u32),
+    tmp: &mut dyn TempHandle,
 ) -> glb::GlbBuilder {
     let mut builder = glb::GlbBuilder::default();
     let mut mesh_of_pd: HashMap<u32, Option<usize>> = HashMap::new();
@@ -307,69 +311,72 @@ fn build_hierarchical(
     let mut processed = 0u32;
 
     // tessellate + dedup one product definition's geometry into a mesh index
-    let mut build_pd =
-        |pd: u32, builder: &mut glb::GlbBuilder, stats: &mut TessStats| -> Option<usize> {
-            if let Some(&cached) = mesh_of_pd.get(&pd) {
-                return cached;
-            }
-            let mut tm = MeshSet::default();
-            let name = asm
-                .products
-                .get(&pd)
-                .map(|n| n.name.clone())
-                .unwrap_or_else(|| format!("PD#{pd}"));
-            if let Some(node) = asm.products.get(&pd) {
-                for &sr in &node.shape_reps {
-                    // honour each representation's own length unit (Autodesk mixes
-                    // mm and metre contexts): tessellate in the rep's unit, scale in
-                    let factor = model::rep_unit_factor(cx.sf, sr, file_unit_scale);
-                    let rep_tp = TessParams {
-                        deflection: cx.tp.deflection / factor,
-                        max_angle: cx.tp.max_angle,
-                    };
-                    let rep_cx = Ctx {
-                        sf: cx.sf,
-                        tp: &rep_tp,
-                        colors: cx.colors,
-                        threads: cx.threads,
-                    };
-                    let mut sub = MeshSet::default();
-                    if let Some(p) = cx.sf.params(sr) {
-                        if let Some(list) = p.get(1).and_then(|v| v.as_list()) {
-                            for it in list {
-                                if let Some(r) = it.as_ref_id() {
-                                    tessellate::tessellate_item(&rep_cx, r, None, &mut sub, stats);
-                                }
+    let mut build_pd = |pd: u32,
+                        builder: &mut glb::GlbBuilder,
+                        tmp: &mut dyn TempHandle,
+                        stats: &mut TessStats|
+     -> Option<usize> {
+        if let Some(&cached) = mesh_of_pd.get(&pd) {
+            return cached;
+        }
+        let mut tm = MeshSet::default();
+        let name = asm
+            .products
+            .get(&pd)
+            .map(|n| n.name.clone())
+            .unwrap_or_else(|| format!("PD#{pd}"));
+        if let Some(node) = asm.products.get(&pd) {
+            for &sr in &node.shape_reps {
+                // honour each representation's own length unit (Autodesk mixes
+                // mm and metre contexts): tessellate in the rep's unit, scale in
+                let factor = model::rep_unit_factor(cx.sf, sr, file_unit_scale);
+                let rep_tp = TessParams {
+                    deflection: cx.tp.deflection / factor,
+                    max_angle: cx.tp.max_angle,
+                };
+                let rep_cx = Ctx {
+                    sf: cx.sf,
+                    tp: &rep_tp,
+                    colors: cx.colors,
+                    threads: cx.threads,
+                };
+                let mut sub = MeshSet::default();
+                if let Some(p) = cx.sf.params(sr) {
+                    if let Some(list) = p.get(1).and_then(|v| v.as_list()) {
+                        for it in list {
+                            if let Some(r) = it.as_ref_id() {
+                                tessellate::tessellate_item(&rep_cx, r, None, &mut sub, stats);
                             }
                         }
                     }
-                    if (factor - 1.0).abs() > 1e-9 {
-                        sub.transform(&M4::scale_uniform(factor));
-                    }
-                    tm.append(&sub);
                 }
+                if (factor - 1.0).abs() > 1e-9 {
+                    sub.transform(&M4::scale_uniform(factor));
+                }
+                tm.append(&sub);
             }
-            prepare_mesh(&mut tm, opts);
-            // tick after the product is tessellated (not before), so progress
-            // never reads 100% while faces are still being worked
-            processed += 1;
-            progress(processed);
-            let mi = if tm.is_empty() {
-                None
-            } else {
-                let h = tm.content_hash();
-                Some(match mesh_of_hash.get(&h) {
-                    Some(&i) => i,
-                    None => {
-                        let i = builder.add_mesh(tm, name);
-                        mesh_of_hash.insert(h, i);
-                        i
-                    }
-                })
-            };
-            mesh_of_pd.insert(pd, mi);
-            mi
+        }
+        prepare_mesh(&mut tm, opts);
+        // tick after the product is tessellated (not before), so progress
+        // never reads 100% while faces are still being worked
+        processed += 1;
+        progress(processed);
+        let mi = if tm.is_empty() {
+            None
+        } else {
+            let h = tm.content_hash();
+            Some(match mesh_of_hash.get(&h) {
+                Some(&i) => i,
+                None => {
+                    let i = builder.add_mesh(tm, name, tmp);
+                    mesh_of_hash.insert(h, i);
+                    i
+                }
+            })
         };
+        mesh_of_pd.insert(pd, mi);
+        mi
+    };
 
     let mut budget: i64 = 2_000_000; // instance-explosion guard
     let mut top: Vec<usize> = Vec::new();
@@ -386,6 +393,7 @@ fn build_hierarchical(
             None,
             &mut builder,
             &mut build_pd,
+            tmp,
             stats,
             0,
             &mut budget,
@@ -404,7 +412,7 @@ fn build_hierarchical(
         }
         prepare_mesh(&mut tm, opts);
         if !tm.is_empty() {
-            let mi = builder.add_mesh(tm, "geometry".into());
+            let mi = builder.add_mesh(tm, "geometry".into(), tmp);
             top.push(builder.add_node("root".into(), None, Some(mi)));
         }
     }
@@ -425,14 +433,20 @@ fn build_hierarchical(
 }
 
 /// Recursively add a product node (with its mesh) and its child instances.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn expand(
     asm: &Assembly,
     pd: u32,
     name: &str,
     transform: Option<M4>,
     builder: &mut glb::GlbBuilder,
-    build_pd: &mut dyn FnMut(u32, &mut glb::GlbBuilder, &mut TessStats) -> Option<usize>,
+    build_pd: &mut dyn FnMut(
+        u32,
+        &mut glb::GlbBuilder,
+        &mut dyn TempHandle,
+        &mut TessStats,
+    ) -> Option<usize>,
+    tmp: &mut dyn TempHandle,
     stats: &mut TessStats,
     depth: usize,
     budget: &mut i64,
@@ -441,7 +455,7 @@ fn expand(
         return None;
     }
     *budget -= 1;
-    let mesh = build_pd(pd, builder, stats);
+    let mesh = build_pd(pd, builder, tmp, stats);
     let node = builder.add_node(name.to_string(), transform, mesh);
     let mut children: Vec<usize> = Vec::new();
     if let Some(kids) = asm.children.get(&pd) {
@@ -453,6 +467,7 @@ fn expand(
                 Some(k.transform),
                 builder,
                 build_pd,
+                tmp,
                 stats,
                 depth + 1,
                 budget,
