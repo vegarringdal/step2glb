@@ -996,6 +996,13 @@ fn report_unsupported(stats: &TessStats) {
         "unsupported representation items (no geometry produced):",
         &stats.unsupported_items,
     );
+    if stats.degenerate_faces > 0 {
+        eprintln!(
+            "note: {} degenerate face(s) skipped (zero-area sliver, e.g. a single \
+             edge whose ends coincide — carries no surface)",
+            stats.degenerate_faces
+        );
+    }
     if !stats.failed_surfaces.is_empty() {
         let mut v: Vec<_> = stats.failed_surfaces.iter().collect();
         v.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));

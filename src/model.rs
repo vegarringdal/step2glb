@@ -199,6 +199,11 @@ pub fn surface(sf: &StepFile, id: u32) -> Option<Surface> {
             Some(reduce_revolution(curve, axis))
         }
         "B_SPLINE_SURFACE_WITH_KNOTS" => bspline_surface_simple(sf, &p).map(Surface::BSpline),
+        "UNIFORM_SURFACE" | "QUASI_UNIFORM_SURFACE" | "BEZIER_SURFACE" => {
+            // no-knot B-spline surface forms: the knot vector is implied by the
+            // type and synthesized from the degree + control-net dimensions
+            bspline_surface_form(sf, &p, KnotForm::from_type(ty)?, None).map(Surface::BSpline)
+        }
         "RECTANGULAR_TRIMMED_SURFACE" => {
             // ('', basis_surface, u1, u2, v1, v2, usense, vsense): a window onto
             // the basis surface's parameter domain. A face that uses it carries
@@ -282,6 +287,11 @@ pub fn curve3(sf: &StepFile, id: u32) -> Option<Curve3> {
         "B_SPLINE_CURVE_WITH_KNOTS" => {
             let p = sf.params(id)?;
             bspline_curve3(sf, &p, None)
+        }
+        "UNIFORM_CURVE" | "QUASI_UNIFORM_CURVE" | "BEZIER_CURVE" => {
+            // no-knot B-spline curve forms: knots implied by the type
+            let p = sf.params(id)?;
+            bspline_curve3_form(sf, &p, KnotForm::from_type(ty)?, None)
         }
         "TRIMMED_CURVE" | "SURFACE_CURVE" | "SEAM_CURVE" => {
             let p = sf.params(id)?;
@@ -620,6 +630,120 @@ fn build_bspline_surface(
     )
 }
 
+/// A B-spline form whose knot vector is *implied* rather than listed (ISO
+/// 10303-42: `uniform_curve`/`_surface`, `quasi_uniform_*`, `bezier_*`).
+#[derive(Clone, Copy)]
+enum KnotForm {
+    /// every knot equally spaced, multiplicity 1 (ends included → not clamped)
+    Uniform,
+    /// ends clamped (multiplicity d+1), interior knots uniform multiplicity 1
+    QuasiUniform,
+    /// piecewise Bézier: ends multiplicity d+1, interior breakpoints d
+    Bezier,
+}
+
+impl KnotForm {
+    /// Map a STEP entity type name to its implied-knot form, if any.
+    fn from_type(ty: &str) -> Option<KnotForm> {
+        match ty {
+            "UNIFORM_CURVE" | "UNIFORM_SURFACE" => Some(KnotForm::Uniform),
+            "QUASI_UNIFORM_CURVE" | "QUASI_UNIFORM_SURFACE" => Some(KnotForm::QuasiUniform),
+            "BEZIER_CURVE" | "BEZIER_SURFACE" => Some(KnotForm::Bezier),
+            _ => None,
+        }
+    }
+}
+
+/// Synthesize the implied knot vector for a no-knot B-spline form, per ISO
+/// 10303-42. `n` is the control-point count in this direction and `d` the
+/// degree; the result always has `n + d + 1` knots (the well-formedness rule
+/// `Σ multiplicities = n + d + 1`). Returns None for a control-point count the
+/// form cannot represent (e.g. a Bézier net that is not a whole number of
+/// degree-d segments).
+fn synthesize_knots(form: KnotForm, d: usize, n: usize) -> Option<Vec<f64>> {
+    if n < d + 1 {
+        return None;
+    }
+    let total = n + d + 1;
+    let knots: Vec<f64> = match form {
+        KnotForm::Uniform => (0..total).map(|i| i as f64).collect(),
+        KnotForm::QuasiUniform => {
+            let interior = n - d - 1; // distinct interior knots, multiplicity 1
+            let mut v = vec![0.0; d + 1];
+            v.extend((1..=interior).map(|j| j as f64));
+            v.extend(std::iter::repeat_n((interior + 1) as f64, d + 1));
+            v
+        }
+        KnotForm::Bezier => {
+            if d == 0 || !(n - 1).is_multiple_of(d) {
+                return None; // not a clean run of degree-d Bézier segments
+            }
+            let segs = (n - 1) / d;
+            let mut v = vec![0.0; d + 1];
+            for s in 1..segs {
+                v.extend(std::iter::repeat_n(s as f64, d));
+            }
+            v.extend(std::iter::repeat_n(segs as f64, d + 1));
+            v
+        }
+    };
+    (knots.len() == total).then_some(knots)
+}
+
+/// Build a `Curve3::BSpline` from a no-knot B-spline curve form (UNIFORM_CURVE
+/// etc.): fields are degree, control_points_list (per the B_SPLINE_CURVE
+/// supertype); the knot vector is synthesized from `form`.
+fn bspline_curve3_form(
+    sf: &StepFile,
+    params: &[P],
+    form: KnotForm,
+    weights: Option<Vec<f64>>,
+) -> Option<Curve3> {
+    let degree = params.get(1)?.as_i64()?.max(1) as usize;
+    let cps: Vec<V3> = params
+        .get(2)?
+        .as_list()?
+        .iter()
+        .filter_map(|e| e.as_ref_id())
+        .filter_map(|r| cartesian_point(sf, r))
+        .collect();
+    if cps.len() < 2 {
+        return None;
+    }
+    if let Some(w) = &weights {
+        if w.len() != cps.len() {
+            return None;
+        }
+    }
+    let knots = synthesize_knots(form, degree, cps.len())?;
+    Some(Curve3::BSpline {
+        degree,
+        knots,
+        cps,
+        weights,
+    })
+}
+
+/// Build a `BSplineSurface` from a no-knot B-spline surface form
+/// (UNIFORM_SURFACE etc.): fields are u_degree, v_degree, control_points_list,
+/// surface_form, u_closed, v_closed (per the B_SPLINE_SURFACE supertype); both
+/// knot vectors are synthesized from `form`.
+fn bspline_surface_form(
+    sf: &StepFile,
+    p: &[P],
+    form: KnotForm,
+    weights: Option<Vec<f64>>,
+) -> Option<BSplineSurface> {
+    let deg_u = p.get(1)?.as_i64()?.max(1) as usize;
+    let deg_v = p.get(2)?.as_i64()?.max(1) as usize;
+    let net = parse_control_net(sf, p.get(3)?)?;
+    let closed_u = p.get(5).and_then(|v| v.as_bool()).unwrap_or(false);
+    let closed_v = p.get(6).and_then(|v| v.as_bool()).unwrap_or(false);
+    let knots_u = synthesize_knots(form, deg_u, net.0)?;
+    let knots_v = synthesize_knots(form, deg_v, net.1)?;
+    build_bspline_surface(deg_u, deg_v, net, weights, knots_u, knots_v, closed_u, closed_v)
+}
+
 // ------------------------------------------------------------- edge sampling
 
 pub struct TessParams {
@@ -849,6 +973,25 @@ fn curve_polyline(
         "B_SPLINE_CURVE_WITH_KNOTS" | "RATIONAL_B_SPLINE_CURVE" => {
             bspline_polyline(sf, id, sf.params(id)?, None, a, b)
         }
+        "UNIFORM_CURVE" | "QUASI_UNIFORM_CURVE" | "BEZIER_CURVE" => {
+            // no-knot B-spline forms as edge geometry: synthesize the implied
+            // knots from the type, then sample like any other B-spline edge
+            let p = sf.params(id)?;
+            let form = KnotForm::from_type(ty)?;
+            let degree = p.get(1)?.as_i64()?.max(1) as usize;
+            let cps: Vec<V3> = p
+                .get(2)?
+                .as_list()?
+                .iter()
+                .filter_map(|e| e.as_ref_id())
+                .filter_map(|r| cartesian_point(sf, r))
+                .collect();
+            if cps.len() < 2 {
+                return None;
+            }
+            let knots = synthesize_knots(form, degree, cps.len())?;
+            sample_bspline_to_polyline(degree, &knots, cps, None, a, b)
+        }
         "POLYLINE" => {
             let p = sf.params(id)?;
             let pts: Vec<V3> = p
@@ -1058,6 +1201,24 @@ fn bspline_polyline_core(
         return Some(pts);
     }
 
+    sample_bspline_to_polyline(degree, &knots, cps, weights, a, b)
+}
+
+/// Sample a B-spline curve with an explicit knot vector into a polyline over its
+/// parametric domain, then align the result to the edge's trimming vertices
+/// a/b. Shared by the explicit-knot path and the no-knot forms (UNIFORM /
+/// QUASI_UNIFORM / BEZIER), whose knots are synthesized first.
+fn sample_bspline_to_polyline(
+    degree: usize,
+    knots: &[f64],
+    cps: Vec<V3>,
+    weights: Option<Vec<f64>>,
+    a: V3,
+    b: V3,
+) -> Option<Vec<V3>> {
+    if knots.len() != cps.len() + degree + 1 {
+        return None;
+    }
     let w = weights.as_deref();
     let t0 = knots[degree];
     let t1 = knots[knots.len() - 1 - degree];
@@ -1065,7 +1226,7 @@ fn bspline_polyline_core(
     let mut pts = Vec::with_capacity(nseg + 1);
     for i in 0..=nseg {
         let t = t0 + (t1 - t0) * i as f64 / nseg as f64;
-        pts.push(bspline_curve_point(degree, &knots, &cps, w, t));
+        pts.push(bspline_curve_point(degree, knots, &cps, w, t));
     }
     let mut pts = align_polyline_to_vertices(pts, a, b);
     *pts.first_mut()? = a;
@@ -1130,6 +1291,51 @@ fn align_polyline_to_vertices(pts: Vec<V3>, a: V3, b: V3) -> Vec<V3> {
             pts[ia..=ib].to_vec()
         } else {
             pts // vertices against the parameter direction: leave as-is
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn synthesize_knots_matches_iso_10303_42_forms() {
+        // total knot count is always n + d + 1 for every form
+        let total = |d: usize, n: usize| n + d + 1;
+
+        // uniform: equally spaced, multiplicity 1 throughout (not clamped)
+        let u = synthesize_knots(KnotForm::Uniform, 3, 5).unwrap();
+        assert_eq!(u, vec![0., 1., 2., 3., 4., 5., 6., 7., 8.]);
+        assert_eq!(u.len(), total(3, 5));
+
+        // quasi-uniform: ends clamped (mult d+1), interior uniform mult 1
+        let q = synthesize_knots(KnotForm::QuasiUniform, 3, 5).unwrap();
+        assert_eq!(q, vec![0., 0., 0., 0., 1., 2., 2., 2., 2.]);
+        assert_eq!(q.len(), total(3, 5));
+        // minimal quasi-uniform net (n = d+1) has no interior knots → Bézier
+        let q2 = synthesize_knots(KnotForm::QuasiUniform, 2, 3).unwrap();
+        assert_eq!(q2, vec![0., 0., 0., 1., 1., 1.]);
+
+        // single Bézier segment: ends mult d+1, no interior
+        let b1 = synthesize_knots(KnotForm::Bezier, 3, 4).unwrap();
+        assert_eq!(b1, vec![0., 0., 0., 0., 1., 1., 1., 1.]);
+        assert_eq!(b1.len(), total(3, 4));
+        // piecewise Bézier: two degree-2 segments → interior breakpoint mult d
+        let b2 = synthesize_knots(KnotForm::Bezier, 2, 5).unwrap();
+        assert_eq!(b2, vec![0., 0., 0., 1., 1., 2., 2., 2.]);
+        assert_eq!(b2.len(), total(2, 5));
+        // a control-point count that is not a whole number of segments is invalid
+        assert!(synthesize_knots(KnotForm::Bezier, 2, 4).is_none());
+
+        // fewer control points than degree+1 cannot form a curve
+        assert!(synthesize_knots(KnotForm::Uniform, 3, 3).is_none());
+
+        // every synthesized vector is non-decreasing and clamps a valid domain
+        for form in [KnotForm::Uniform, KnotForm::QuasiUniform, KnotForm::Bezier] {
+            let k = synthesize_knots(form, 3, 7).unwrap();
+            assert!(k.windows(2).all(|w| w[1] >= w[0]), "knots must be sorted");
+            assert!(k[k.len() - 1 - 3] > k[3], "domain must be non-empty");
         }
     }
 }

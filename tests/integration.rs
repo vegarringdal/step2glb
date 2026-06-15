@@ -64,6 +64,22 @@ fn total_area(m: &TriMesh) -> f64 {
         .sum()
 }
 
+/// Signed volume of a closed, outward-oriented mesh (divergence theorem):
+/// Σ (v0 · (v1 × v2)) / 6. Positive when the surface normals face outward.
+fn signed_volume(m: &TriMesh) -> f64 {
+    let p = |i: u32| {
+        v3(
+            m.positions[i as usize * 3] as f64,
+            m.positions[i as usize * 3 + 1] as f64,
+            m.positions[i as usize * 3 + 2] as f64,
+        )
+    };
+    m.indices
+        .chunks(3)
+        .map(|t| p(t[0]).dot(p(t[1]).cross(p(t[2]))) / 6.0)
+        .sum()
+}
+
 // ------------------------------------------------------------- planar face
 
 #[test]
@@ -175,6 +191,157 @@ fn bspline_patch_with_degenerate_bound_tessellates_full_domain() {
     for p in mesh.positions.chunks(3) {
         assert!(p[2].abs() < 1e-6, "off-plane point {:?}", p);
     }
+}
+
+// --------------------------- closed B-spline with a degenerate apex (pole)
+
+#[test]
+fn closed_bspline_cone_with_apex_pole_tessellates() {
+    // Vendor excerpt: a rational B-spline closed in u whose top control row
+    // collapses to one point — a NURBS cone/dome apex (a parametric pole). Its
+    // lone boundary loop winds once around the seam, so it used to fall into the
+    // periodic-band path and fail ("no analytic v_caps for a B-spline pole").
+    // The closed-surface grid path must cap it: tessellate, not skip.
+    let sf = load("bspline_cone_pole.step");
+    let (set, stats) = tessellate_all(&sf, &["ADVANCED_FACE"]);
+    let mesh = set.merged();
+    assert_eq!(stats.faces_ok, 1, "capped B-spline must tessellate, not skip");
+    assert_eq!(stats.faces_failed, 0);
+    assert_eq!(stats.degenerate_faces, 0);
+    assert!(!mesh.is_empty(), "must emit triangles");
+    // the apex row collapses, so a band of triangles there is zero-area, but the
+    // dome wall has real area — sanity-check it is positive and finite
+    let area = total_area(&mesh);
+    assert!(area > 1.0 && area.is_finite(), "implausible dome area {area}");
+    // By the convex-hull property a B-spline surface lies within the bounding
+    // box of its control net. At ~3.5M-unit coordinates this is the robust
+    // on-surface check (Newton round-trip is noisy at that magnitude); it also
+    // rules out the pre-fix garbage — fold-bridging triangles would land far
+    // outside the net. The control net spans ~87 x 87 x 17 units.
+    let surf = step2glb::model::surface(&sf, 288206).expect("surface");
+    let (lo, hi) = match &surf {
+        step2glb::geom::Surface::BSpline(b) => {
+            let mut lo = v3(f64::MAX, f64::MAX, f64::MAX);
+            let mut hi = v3(f64::MIN, f64::MIN, f64::MIN);
+            for p in &b.cps {
+                lo = v3(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+                hi = v3(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+            }
+            (lo, hi)
+        }
+        _ => panic!("expected a B-spline surface"),
+    };
+    let eps = 1e-3 * hi.sub(lo).len();
+    for c in mesh.positions.chunks(3) {
+        let p = v3(c[0] as f64, c[1] as f64, c[2] as f64);
+        assert!(
+            p.x >= lo.x - eps && p.x <= hi.x + eps
+                && p.y >= lo.y - eps && p.y <= hi.y + eps
+                && p.z >= lo.z - eps && p.z <= hi.z + eps,
+            "vertex {p:?} outside control-net hull (fold garbage?)"
+        );
+    }
+}
+
+// ---------------------------------------- CSG: block minus a drilled cylinder
+
+#[test]
+fn csg_block_minus_cylinder_drills_a_hole() {
+    // CSG_SOLID -> BOOLEAN_RESULT(.DIFFERENCE., BLOCK 10^3, CYLINDER r3 h10).
+    // Evaluating the boolean must drill a through-hole, not render the block and
+    // cylinder as separate solids. Checked by enclosed volume: block 1000 minus
+    // a (faceted) cylinder pi*3^2*10 ~= 282.7, so ~717. The faceted hole removes
+    // slightly less than the ideal cylinder, so the result is marginally above.
+    let sf = load("csg_block_minus_cylinder.step");
+    let (set, stats) = tessellate_all(&sf, &["CSG_SOLID"]);
+    let mesh = set.merged();
+    assert_eq!(stats.faces_ok, 1, "CSG_SOLID must evaluate to geometry");
+    assert!(!mesh.is_empty());
+    let vol = signed_volume(&mesh);
+    let ideal = 1000.0 - std::f64::consts::PI * 9.0 * 10.0; // ~717.26
+    assert!(
+        vol > ideal - 1.0 && vol < ideal + 6.0,
+        "volume {vol:.2} vs ideal {ideal:.2} (block-with-hole)"
+    );
+    // sanity: clearly less than the solid block (the hole was actually removed)
+    assert!(vol < 950.0, "hole not removed (volume {vol:.2} ~ solid block)");
+    // every vertex lies within the block bounds [0,10]^3 (no stray geometry)
+    for c in mesh.positions.chunks(3) {
+        for &x in c {
+            assert!((-1e-4..=10.0 + 1e-4).contains(&x), "vertex out of block: {c:?}");
+        }
+    }
+}
+
+// ------------------------------- no-knot B-spline forms (uniform / Bézier)
+
+#[test]
+fn bezier_surface_form_synthesizes_knots_and_evaluates() {
+    // A degree-2x2 BEZIER_SURFACE carries no explicit knots — they are implied
+    // by the type and must be synthesized. Flat 10x10 corners with the centre
+    // control point lifted to z=5 make it a genuine curved Bézier (not a plane):
+    // verify it resolves and evaluates (corners interpolate, centre bulges).
+    let src = "DATA;
+#10=CARTESIAN_POINT('',(0.,0.,0.));
+#11=CARTESIAN_POINT('',(0.,5.,0.));
+#12=CARTESIAN_POINT('',(0.,10.,0.));
+#13=CARTESIAN_POINT('',(5.,0.,0.));
+#14=CARTESIAN_POINT('',(5.,5.,5.));
+#15=CARTESIAN_POINT('',(5.,10.,0.));
+#16=CARTESIAN_POINT('',(10.,0.,0.));
+#17=CARTESIAN_POINT('',(10.,5.,0.));
+#18=CARTESIAN_POINT('',(10.,10.,0.));
+#20=BEZIER_SURFACE('',2,2,((#10,#11,#12),(#13,#14,#15),(#16,#17,#18)),.UNSPECIFIED.,.F.,.F.,.F.);
+ENDSEC;";
+    let sf = StepFile::parse(src.as_bytes().to_vec()).expect("parse");
+    let surf = step2glb::model::surface(&sf, 20).expect("BEZIER_SURFACE resolves");
+    assert!(
+        matches!(surf, step2glb::geom::Surface::BSpline(_)),
+        "BEZIER_SURFACE must build a B-spline"
+    );
+    // Bézier patches interpolate their corner control points (domain [0,1]^2)
+    assert!(surf.point(0., 0.).sub(v3(0., 0., 0.)).len() < 1e-9);
+    assert!(surf.point(1., 1.).sub(v3(10., 10., 0.)).len() < 1e-9);
+    // de Casteljau at the centre: z = 0.25 * 5 = 1.25, proving it is evaluated
+    // as a real Bézier surface, not flattened
+    let c = surf.point(0.5, 0.5);
+    assert!((c.x - 5.).abs() < 1e-9 && (c.y - 5.).abs() < 1e-9, "centre xy {c:?}");
+    assert!((c.z - 1.25).abs() < 1e-9, "centre bulge z {} (want 1.25)", c.z);
+}
+
+#[test]
+fn uniform_curve_form_synthesizes_knots() {
+    // A UNIFORM_CURVE carries no explicit knots either. Degree 1 over three
+    // collinear control points must resolve to a B-spline curve, not be dropped
+    // as an unsupported curve type.
+    let src = "DATA;
+#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=CARTESIAN_POINT('',(5.,0.,0.));
+#3=CARTESIAN_POINT('',(10.,0.,0.));
+#4=UNIFORM_CURVE('',1,(#1,#2,#3),.UNSPECIFIED.,.F.,.F.);
+ENDSEC;";
+    let sf = StepFile::parse(src.as_bytes().to_vec()).expect("parse");
+    let curve = step2glb::model::curve3(&sf, 4).expect("UNIFORM_CURVE resolves");
+    assert!(
+        matches!(curve, step2glb::geom::Curve3::BSpline { .. }),
+        "UNIFORM_CURVE must build a B-spline curve"
+    );
+}
+
+// -------------------------------- degenerate zero-area sliver face is skipped
+
+#[test]
+fn degenerate_sliver_face_is_skipped_not_failed() {
+    // A planar face bounded by a single edge whose start and end vertex coincide
+    // (a LINE cannot close on itself with any area) is a zero-area sliver — CAD
+    // kernels emit these from boolean ops. It must be counted as degenerate and
+    // skipped quietly, NOT reported as a tessellation failure.
+    let sf = load("degenerate_sliver_face.step");
+    let (set, stats) = tessellate_all(&sf, &["ADVANCED_FACE"]);
+    assert_eq!(stats.degenerate_faces, 1, "sliver must be flagged degenerate");
+    assert_eq!(stats.faces_failed, 0, "a zero-area face is not a failure");
+    assert_eq!(stats.faces_ok, 0);
+    assert!(set.merged().is_empty(), "degenerate face emits no geometry");
 }
 
 // -------------------------------------------- periodic full cylinder band

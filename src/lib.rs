@@ -4,6 +4,7 @@
 //! The binary (`main.rs`) is a thin CLI over this library, so the pipeline
 //! can also be embedded and unit/integration tested.
 
+pub mod csg;
 pub mod geom;
 pub mod glb;
 pub mod hierarchy;

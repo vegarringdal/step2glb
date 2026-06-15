@@ -330,6 +330,7 @@ src/step.rs        Part-21 indexer + lazy parameter parser (incl. complex instan
 src/geom.rs        V3 / M4 / frames, analytic surfaces, B-spline curve eval
 src/model.rs       typed entity accessors, edge-curve discretization, per-context units
 src/tessellate.rs  B-rep traversal, UV tessellation, seam handling, refinement
+src/csg.rs         CSG primitives + BSP-tree mesh boolean (CSG_SOLID evaluation)
 src/hierarchy.rs   product graph, NAUO edges, instance transforms
 src/styles.rs      STYLED_ITEM color chains, named pre-defined colours
 src/merge.rs       --merged: world-space bake, per-color merge, draw ranges
@@ -350,8 +351,9 @@ let asm = step2glb::hierarchy::build(&sf);
 | Kind      | Supported                                                                  |
 | --------- | -------------------------------------------------------------------------- |
 | Solids    | `MANIFOLD_SOLID_BREP`, `BREP_WITH_VOIDS`, `FACETED_BREP`, `SHELL_BASED_SURFACE_MODEL`, `FACE_BASED_SURFACE_MODEL` |
-| Surfaces  | `PLANE`, `CYLINDRICAL_SURFACE`, `CONICAL_SURFACE`, `SPHERICAL_SURFACE`, `TOROIDAL_SURFACE`, `SURFACE_OF_LINEAR_EXTRUSION`, `SURFACE_OF_REVOLUTION`, `B_SPLINE_SURFACE_WITH_KNOTS` incl. the rational complex-instance form, `RECTANGULAR_TRIMMED_SURFACE` (resolved to its basis surface) (+ near-planar fallback via Newell plane fit) |
-| Curves    | `LINE`, `CIRCLE`, `ELLIPSE`, `HYPERBOLA`, `PARABOLA`, `B_SPLINE_CURVE_WITH_KNOTS` (incl. rational complex form), `POLYLINE`, `TRIMMED_CURVE`, `COMPOSITE_CURVE` (+ `COMPOSITE_CURVE_SEGMENT`), `SURFACE_CURVE`/`SEAM_CURVE` (via 3D curve); a null (`$`) or otherwise unresolved/unsupported edge curve falls back to a straight segment between the edge vertices (and is tallied in the report) |
+| CSG       | `CSG_SOLID` / `BOOLEAN_RESULT` (`union` / `intersection` / `difference`) over the primitives `BLOCK`, `RIGHT_CIRCULAR_CYLINDER`, `RIGHT_CIRCULAR_CONE`, `SPHERE`, `TORUS` — evaluated by a BSP-tree mesh boolean (`right_angular_wedge`, `half_space_solid` and B-rep operands not yet meshed) |
+| Surfaces  | `PLANE`, `CYLINDRICAL_SURFACE`, `CONICAL_SURFACE`, `SPHERICAL_SURFACE`, `TOROIDAL_SURFACE`, `SURFACE_OF_LINEAR_EXTRUSION`, `SURFACE_OF_REVOLUTION`, `B_SPLINE_SURFACE_WITH_KNOTS` incl. the rational complex-instance form, `UNIFORM_SURFACE` / `QUASI_UNIFORM_SURFACE` / `BEZIER_SURFACE` (implied knots synthesized), `RECTANGULAR_TRIMMED_SURFACE` (resolved to its basis surface) (+ near-planar fallback via Newell plane fit) |
+| Curves    | `LINE`, `CIRCLE`, `ELLIPSE`, `HYPERBOLA`, `PARABOLA`, `B_SPLINE_CURVE_WITH_KNOTS` (incl. rational complex form), `UNIFORM_CURVE` / `QUASI_UNIFORM_CURVE` / `BEZIER_CURVE` (implied knots synthesized), `POLYLINE`, `TRIMMED_CURVE`, `COMPOSITE_CURVE` (+ `COMPOSITE_CURVE_SEGMENT`), `SURFACE_CURVE`/`SEAM_CURVE` (via 3D curve); a null (`$`) or otherwise unresolved/unsupported edge curve falls back to a straight segment between the edge vertices (and is tallied in the report) |
 | Tessellated | `TRIANGULATED_FACE_SET`, `TRIANGULATED_SURFACE_SET`, `TESSELLATED_SOLID`, `TESSELLATED_SHELL`, and the AP242-ed2 `TRIANGULATED_FACE` / `COMPLEX_TRIANGULATED_FACE` (the `geometric_link` slot is auto-detected; `triangle_strips` / `triangle_fans` decoded with GL winding) |
 | Wireframe | `GEOMETRIC_CURVE_SET` / `GEOMETRIC_SET` (datum / reference curves) emitted as glTF LINE primitives; hierarchical output only |
 | Instancing | `MAPPED_ITEM` / `REPRESENTATION_MAP`, NAUO assembly instances             |
@@ -422,6 +424,18 @@ cargo test
     B-spline edges with the vertex half-way around the basis curve's seam
     (vendor-model excerpt): the rim polylines are re-seamed at the vertex
     instead of snapping the curve endpoints across the cylinder.
+  - `bspline_cone_pole.step` — a rational B-spline closed in u whose top control
+    row collapses to one point, a NURBS cone/dome apex (vendor-model excerpt):
+    the degenerate pole is detected and the capped surface gridded over its full
+    domain instead of being skipped by the periodic-band path.
+  - `degenerate_sliver_face.step` — a planar face bounded by a single edge whose
+    start and end vertex coincide (vendor-model excerpt): a zero-area sliver,
+    counted as a degenerate face and skipped quietly, not flagged as a failure.
+  - `csg_block_minus_cylinder.step` — a `CSG_SOLID` drilling a cylinder out of a
+    block via `BOOLEAN_RESULT(.DIFFERENCE.)`: the BSP mesh boolean must remove the
+    hole, checked by enclosed volume (block 1000 − cylinder ≈ 717) with every
+    vertex inside the block bounds. Plus `src/csg.rs` unit tests asserting exact
+    primitive volumes and set-volume identities for union/intersection/difference.
   - `colored.step` — a `STYLED_ITEM` chain: color map -> mesh bucket -> GLB
     material assertions.
   - merged mode: draw ranges tile every color mesh's index buffer exactly and
@@ -453,6 +467,27 @@ cargo test
       whole closed surface — and gridded over the full domain (gridding a closed
       surface's full period covers it exactly once, fold-free). Checked before
       the seam-complement path so a stray short end-loop can't mis-route it.
+- [x] ~~Closed B-spline cones/domes with a degenerate apex (parametric pole)~~: a
+      NURBS cone/dome is a tensor-product patch closed in one direction whose
+      opposite control row is *coalesced to a single point* — the standard way to
+      build a sphere/cone tip (the collapsed row is a parametric pole). Such a
+      face is cut open by a radial seam, so its lone boundary loop winds once
+      (`w = ±1`) and entered the periodic-band path, which expects a clean iso-v
+      circle to pair against a polar cap line — and a B-spline has no analytic
+      `v_caps()` for it to synthesize one from, so the face was skipped. Now a
+      collapsed control row is detected as a pole (`bspline_has_v_pole`); a single
+      full-domain loop on such a closed surface is gridded over the whole domain
+      (the apex row yields zero-area triangles that cleanup drops), fold-free.
+      Gated on a single loop (no interior hole to over-fill) and on an actual
+      pole, so genuine uncapped bands still take the periodic-band path.
+- [x] ~~Degenerate zero-area "sliver" faces reported as failures~~: CAD kernels
+      emit faces bounded by a single edge whose start and end vertex coincide (a
+      `LINE` cannot close on itself with any area) from boolean operations. These
+      carry no surface, but were logged as "trimming/tessellation failed", framing
+      a non-problem as a bug. A face whose boundary discretizes to fewer than
+      three distinct points is now counted as `degenerate_faces` and skipped with
+      a soft note — distinct from a boundary that produced *nothing* (an
+      unsupported curve), which still reports a real failure.
 - [x] ~~Exploding / folded high-aspect wound B-spline strips~~: a structural
       part's wound body is a degree-3 NURBS with an extreme parameter aspect
       ratio (u≈1, v≈16000). It is the *whole* parametric patch, but its boundary
@@ -520,11 +555,33 @@ cargo test
         element discretized into a position-only line polyline, kept in its own
         bucket so the triangle pipeline (meshopt / simplify) never touches it.
         Hierarchical output only; merged mode skips it.
+  - [x] ~~Uniform / quasi-uniform / Bézier `B_SPLINE_*` forms (no explicit
+        knots)~~: `UNIFORM_CURVE` / `QUASI_UNIFORM_CURVE` / `BEZIER_CURVE` and the
+        `*_SURFACE` equivalents carry no knot vector — it is *implied* by the type
+        (ISO 10303-42). The implied knots are synthesized from the degree and
+        control-point count — uniform = all multiplicity 1 (not clamped),
+        quasi-uniform = ends clamped (mult d+1) with interior uniform, Bézier =
+        ends clamped with interior breakpoints of multiplicity d (piecewise) —
+        and the result flows through the existing B-spline eval/tessellation
+        unchanged. Knot count is always `n + d + 1`; an invalid Bézier net (not a
+        whole number of degree-d segments) is rejected.
+  - [x] ~~`CSG_SOLID` / `BOOLEAN_RESULT` (constructive solid geometry)~~: STEP
+        stores CSG as a recipe — primitives combined by set operations — not a
+        mesh. The primitives (`BLOCK`, `RIGHT_CIRCULAR_CYLINDER`,
+        `RIGHT_CIRCULAR_CONE`, `SPHERE`, `TORUS`) are meshed into closed,
+        outward-oriented polygon soups, then the boolean tree
+        (`union`/`intersection`/`difference`) is evaluated by a **BSP-tree mesh
+        boolean** (the Thurston / csg.js algorithm — partition each operand by
+        the other's face planes, keep/drop/flip the right fragments, stitch). The
+        on-plane tolerance is relative to the operands' extent (scale-independent,
+        no magic constant). Robust for primitive trees; the known soft spot is
+        exactly-coplanar coincident faces between operands. `right_angular_wedge`,
+        `half_space_solid` and B-rep solid operands are not yet meshed (reported,
+        not silent). See `src/csg.rs`.
   - [ ] Lower priority (rare in exchange, surface as skipped-face/approximated
         warnings, not silent): `OFFSET_SURFACE`, `CURVE_BOUNDED_SURFACE`,
-        uniform/Bézier `B_SPLINE_*` forms (no explicit knots),
         `SURFACE_CURVE_SWEPT_SURFACE` / `FIXED_REFERENCE_SWEPT_SURFACE`,
-        `SWEPT_AREA_SOLID` / `CSG_SOLID`, `OFFSET_CURVE_2D/3D`.
+        `SWEPT_AREA_SOLID`, `OFFSET_CURVE_2D/3D`.
 - [x] ~~Seam-straddling "long way around" faces on a closed surface~~: a face
       on a periodic surface (e.g. a spherical ball-joint) whose outer boundary
       does not net-wind but straddles the u seam, with the face interior

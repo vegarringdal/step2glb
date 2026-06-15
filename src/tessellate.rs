@@ -36,6 +36,10 @@ use crate::styles::ColorMap;
 pub struct TessStats {
     pub faces_ok: usize,
     pub faces_failed: usize,
+    /// faces with a boundary that collapses to no area — a sliver/degenerate
+    /// face (e.g. a single edge whose start and end vertex coincide). These
+    /// carry zero surface, so they are skipped without counting as failures.
+    pub degenerate_faces: usize,
     pub unsupported_surfaces: HashMap<String, usize>,
     /// supported surface types whose trimming/tessellation still failed
     /// (Newton non-convergence, multi-winding loops, degenerate bounds, …):
@@ -70,6 +74,7 @@ impl TessStats {
     pub fn merge(&mut self, o: &TessStats) {
         self.faces_ok += o.faces_ok;
         self.faces_failed += o.faces_failed;
+        self.degenerate_faces += o.degenerate_faces;
         merge_counts(&mut self.unsupported_surfaces, &o.unsupported_surfaces);
         merge_counts(&mut self.approximated_surfaces, &o.approximated_surfaces);
         merge_counts(&mut self.unsupported_curves, &o.unsupported_curves);
@@ -238,6 +243,24 @@ pub fn tessellate_item(
         "GEOMETRIC_CURVE_SET" | "GEOMETRIC_SET" => {
             tessellate_curve_set(cx, id, color, out, stats);
             true
+        }
+        // constructive solid geometry: mesh the primitives and evaluate the
+        // boolean tree (union / difference / intersection) into one mesh
+        "CSG_SOLID" | "BOOLEAN_RESULT" | "BLOCK" | "RIGHT_CIRCULAR_CYLINDER"
+        | "RIGHT_CIRCULAR_CONE" | "SPHERE" | "TORUS" => {
+            match crate::csg::eval_csg(sf, id, cx.tp) {
+                Some(mesh) if !mesh.is_empty() => {
+                    out.bucket(color).append(&mesh);
+                    stats.faces_ok += 1;
+                    true
+                }
+                // a CSG operand we cannot mesh (right_angular_wedge,
+                // half_space_solid, a B-rep solid operand) — surface it
+                _ => {
+                    *stats.unsupported_items.entry(ty.clone()).or_insert(0) += 1;
+                    false
+                }
+            }
         }
         // datums/origins legitimately sit in a SHAPE_REPRESENTATION item list
         // next to the geometry and carry no surface — not a missing feature
@@ -507,6 +530,16 @@ fn tessellate_face(
                 return;
             }
         }
+        // A boundary that discretized but collapses to no area (e.g. a sliver
+        // face bounded by one edge whose two ends are the same vertex) is a
+        // degenerate face carrying zero surface — skip it quietly, don't flag a
+        // tessellation failure. A boundary that produced nothing at all (an
+        // unsupported edge curve, already tallied) still falls through to the
+        // failure report.
+        if boundary_is_degenerate(sf, &bounds, tp) {
+            stats.degenerate_faces += 1;
+            return;
+        }
         stats.faces_failed += 1;
         record_failed(
             stats,
@@ -632,6 +665,43 @@ fn build_loops3d(
         }
     }
     loops3d
+}
+
+/// True if a face's boundary discretized to points but encloses no area — fewer
+/// than 3 distinct boundary points across all its bounds. The canonical case is
+/// a sliver face bounded by one edge whose start and end vertex coincide (a
+/// straight LINE cannot close on itself with any area), which CAD kernels emit
+/// from boolean operations. Distinct from a boundary that produced *nothing* (an
+/// unsupported curve): there we get no points and report a real failure.
+fn boundary_is_degenerate(sf: &StepFile, bounds: &[crate::step::P], tp: &TessParams) -> bool {
+    let mut sink = HashMap::new();
+    let mut pts: Vec<V3> = Vec::new();
+    for b in bounds {
+        let bid = match b.as_ref_id() {
+            Some(b) => b,
+            None => continue,
+        };
+        let loop_id = sf
+            .params(bid)
+            .and_then(|bp| bp.get(1).and_then(|v| v.as_ref_id()));
+        if let Some(lid) = loop_id {
+            if let Some(lp) = loop_polyline(sf, lid, tp, &mut sink) {
+                pts.extend_from_slice(&lp);
+            }
+        }
+    }
+    if pts.is_empty() {
+        return false; // nothing discretized — not "degenerate", just absent
+    }
+    let scale = pts.iter().fold(1.0_f64, |m, p| m.max(p.len()));
+    let eps = 1e-7 * scale;
+    let mut distinct: Vec<V3> = Vec::new();
+    for p in &pts {
+        if !distinct.iter().any(|q| q.sub(*p).len() < eps) {
+            distinct.push(*p);
+        }
+    }
+    distinct.len() < 3
 }
 
 /// Track a failed face: per-surface-type count plus a few sample face ids so
@@ -968,6 +1038,27 @@ fn face_to_mesh(
             tessellate_unbounded(surf, tp, same_sense, mesh),
             "slit/full-surface tessellation failed (surface not closed-form invertible)",
         );
+    }
+
+    // A closed (periodic) B-spline whose single boundary loop spans the whole
+    // domain is the entire *capped* surface — a cone/dome whose apex row of
+    // control points collapses to a point (a parametric pole, the NURBS way of
+    // building a sphere/cone tip), cut open by a radial seam. The seam makes
+    // the lone loop wind once (w=±1), so it would enter the periodic-band path
+    // below; but that path expects a clean iso-v circle to pair against a cap
+    // line, not a loop that also dives down the seam to the pole, and a B-spline
+    // has no analytic v_caps() for it to synthesize the cap from. Grid the full
+    // domain instead (fold-free; the collapsed row yields zero-area triangles at
+    // the tip that cleanup drops). Gated on a single loop, so there is no
+    // interior hole to over-fill, and on an actual degenerate pole, so genuine
+    // uncapped bands still take the periodic-band path.
+    if loops_uv.len() == 1 && bspline_has_v_pole(surf) {
+        let contour = [loops_uv[0].uv.clone()];
+        if let Some((uu, vv)) = full_wrap_bspline(surf, &contour) {
+            if tessellate_uv_grid(surf, uu, vv, tp, same_sense, mesh) {
+                return Ok(());
+            }
+        }
     }
 
     if loops_uv.iter().any(|l| l.w != 0) {
@@ -1452,6 +1543,30 @@ fn full_wrap_bspline(surf: &Surface, contours: &[Vec<[f64; 2]>]) -> Option<((f64
     } else {
         None
     }
+}
+
+/// True if a B-spline surface has a degenerate v-edge — a row of control points
+/// (at v = v0 or v = v1) that all coincide, so the surface collapses to a single
+/// point there. This is a parametric pole, the standard NURBS way of forming a
+/// cone apex / sphere pole (the edge's control points are coalesced). The
+/// analytic `v_caps()` only knows these for explicit spheres/cones; detecting one
+/// on a B-spline lets the closed-surface grid path cap it instead of feeding a
+/// seam-pierced loop to the periodic-band pairing.
+fn bspline_has_v_pole(surf: &Surface) -> bool {
+    let b = match surf {
+        Surface::BSpline(b) => b,
+        _ => return false,
+    };
+    if b.nu < 2 || b.nv == 0 {
+        return false;
+    }
+    let eps = 1e-6 * b.size.max(1.0);
+    // column `iv` (fixed v, varying u) collapsed to one point across all rows
+    let collapsed = |iv: usize| {
+        let first = b.cps[iv];
+        (1..b.nu).all(|iu| b.cps[iu * b.nv + iv].sub(first).len() < eps)
+    };
+    collapsed(0) || collapsed(b.nv - 1)
 }
 
 /// Do segments p1p2 and p3p4 properly cross (interiors intersect)?
@@ -2487,6 +2602,54 @@ mod tests {
             [u0, v0 + 0.1 * (v1 - v0)],
         ]];
         assert!(full_wrap_bspline(&s, &part).is_none());
+    }
+
+    #[test]
+    fn bspline_v_pole_detects_a_collapsed_control_row() {
+        use crate::geom::BSplineSurface;
+        // a closed-in-u dome: deg-1 ring of 4 points around u, deg-1 along v,
+        // whose top v-row (iv = nv-1) collapses to a single apex point
+        let (nu, nv) = (4usize, 2usize);
+        let mk = |apex_collapsed: bool| {
+            // row-major: cps[iu * nv + iv], matching BSplineSurface indexing
+            let mut cps = Vec::new();
+            for iu in 0..nu {
+                for iv in 0..nv {
+                    let a = iu as f64 / nu as f64 * std::f64::consts::TAU;
+                    if iv == nv - 1 && apex_collapsed {
+                        cps.push(v3(0.0, 0.0, 5.0)); // shared apex
+                    } else {
+                        cps.push(v3(2.0 * a.cos(), 2.0 * a.sin(), 3.0 * iv as f64));
+                    }
+                }
+            }
+            Surface::BSpline(
+                BSplineSurface {
+                    deg_u: 1,
+                    deg_v: 1,
+                    nu,
+                    nv,
+                    cps,
+                    weights: None,
+                    knots_u: vec![0.0, 1.0, 2.0, 3.0, 4.0],
+                    knots_v: vec![0.0, 0.0, 1.0, 1.0],
+                    closed_u: true,
+                    closed_v: false,
+                    size: 0.0,
+                }
+                .finish(),
+            )
+        };
+        // the collapsed top row is a parametric pole (cone apex / dome tip)
+        assert!(bspline_has_v_pole(&mk(true)));
+        // an ordinary open tube has no collapsed row
+        assert!(!bspline_has_v_pole(&mk(false)));
+        // analytic surfaces are not B-splines: no pole reported here
+        assert!(!bspline_has_v_pole(&Surface::Plane(crate::geom::Frame::new(
+            V3::ZERO,
+            None,
+            None
+        ))));
     }
 
     #[test]

@@ -71,6 +71,13 @@ impl P {
             _ => None,
         }
     }
+    /// An enumeration value (`.DIFFERENCE.` → `"DIFFERENCE"`), already uppercased.
+    pub fn as_enum(&self) -> Option<&str> {
+        match self {
+            P::Enum(e) => Some(e),
+            _ => None,
+        }
+    }
     /// `.T.` / `.F.` enums as bool.
     pub fn as_bool(&self) -> Option<bool> {
         match self {

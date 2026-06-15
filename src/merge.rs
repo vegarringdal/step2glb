@@ -19,6 +19,7 @@ pub const FALLBACK_TYPES: &[&str] = &[
     "SHELL_BASED_SURFACE_MODEL",
     "TRIANGULATED_FACE_SET",
     "TESSELLATED_SOLID",
+    "CSG_SOLID",
 ];
 
 #[derive(Clone, Copy)]
