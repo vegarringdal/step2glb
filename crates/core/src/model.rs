@@ -26,9 +26,10 @@ fn si_prefix_scale(prefix: Option<&str>) -> f64 {
 /// an inch/foot `CONVERSION_BASED_UNIT`. Returns `None` for angle/other units.
 fn length_unit_scale(sf: &StepFile, unit: u32) -> Option<f64> {
     // an SI metre unit is a length unit whether or not it is tagged LENGTH_UNIT
-    let si = sf
-        .complex_leaf(unit, "SI_UNIT")
-        .or_else(|| sf.params(unit).filter(|_| sf.entity_type(unit) == Some("SI_UNIT")));
+    let si = sf.complex_leaf(unit, "SI_UNIT").or_else(|| {
+        sf.params(unit)
+            .filter(|_| sf.entity_type(unit) == Some("SI_UNIT"))
+    });
     if let Some(si) = si {
         let mut prefix = None;
         let mut metre = false;
@@ -741,7 +742,9 @@ fn bspline_surface_form(
     let closed_v = p.get(6).and_then(|v| v.as_bool()).unwrap_or(false);
     let knots_u = synthesize_knots(form, deg_u, net.0)?;
     let knots_v = synthesize_knots(form, deg_v, net.1)?;
-    build_bspline_surface(deg_u, deg_v, net, weights, knots_u, knots_v, closed_u, closed_v)
+    build_bspline_surface(
+        deg_u, deg_v, net, weights, knots_u, knots_v, closed_u, closed_v,
+    )
 }
 
 // ------------------------------------------------------------- edge sampling
@@ -885,7 +888,8 @@ fn curve_endpoints(sf: &StepFile, id: u32) -> Option<(V3, V3)> {
                     .filter_map(|v| v.as_ref_id())
                     .find_map(|r| cartesian_point(sf, r))
             };
-            let (ba, bb) = curve_endpoints(sf, p.get(1)?.as_ref_id()?).unwrap_or((V3::ZERO, V3::ZERO));
+            let (ba, bb) =
+                curve_endpoints(sf, p.get(1)?.as_ref_id()?).unwrap_or((V3::ZERO, V3::ZERO));
             Some((trim_pt(2).unwrap_or(ba), trim_pt(3).unwrap_or(bb)))
         }
         "COMPOSITE_CURVE" => {
@@ -1015,7 +1019,8 @@ fn curve_polyline(
             let f = axis2_placement(sf, p.get(1)?.as_ref_id()?)?;
             let (sa, si) = (p.get(2)?.as_f64()?, p.get(3)?.as_f64()?);
             let eval = |u: f64| {
-                f.o.add(f.x.scale(sa * u.cosh())).add(f.y.scale(si * u.sinh()))
+                f.o.add(f.x.scale(sa * u.cosh()))
+                    .add(f.y.scale(si * u.sinh()))
             };
             let param = |pt: V3| (pt.sub(f.o).dot(f.y) / si).asinh();
             let mut pts = sample_param_curve(&eval, param(a), param(b), tp);
@@ -1059,9 +1064,7 @@ fn curve_polyline(
                 let mut seg_pts = curve_polyline(sf, parent, qa, qb, tp, unsup)?;
                 // make the segment run qa -> qb regardless of how the parent
                 // discretizer ordered it (e.g. a reversed POLYLINE)
-                if seg_pts.len() >= 2
-                    && qa.sub(seg_pts[0]).len() > qa.sub(*seg_pts.last()?).len()
-                {
+                if seg_pts.len() >= 2 && qa.sub(seg_pts[0]).len() > qa.sub(*seg_pts.last()?).len() {
                     seg_pts.reverse();
                 }
                 let skip = usize::from(out.last().is_some_and(|t| t.sub(seg_pts[0]).len() < eps));

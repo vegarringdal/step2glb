@@ -411,10 +411,22 @@ fn cylinder(f: &Frame, height: f64, radius: f64, tp: &TessParams) -> Vec<Polygon
         let (t0, t1) = (b0.add(top), b1.add(top));
         // side quad, outward radial normals (smooth shading around the wall)
         if let Some(p) = Polygon::new(vec![
-            Vertex { pos: b0, normal: r0 },
-            Vertex { pos: b1, normal: r1 },
-            Vertex { pos: t1, normal: r1 },
-            Vertex { pos: t0, normal: r0 },
+            Vertex {
+                pos: b0,
+                normal: r0,
+            },
+            Vertex {
+                pos: b1,
+                normal: r1,
+            },
+            Vertex {
+                pos: t1,
+                normal: r1,
+            },
+            Vertex {
+                pos: t0,
+                normal: r0,
+            },
         ]) {
             polys.push(p);
         }
@@ -454,9 +466,18 @@ fn cone(f: &Frame, height: f64, radius: f64, tp: &TessParams) -> Vec<Polygon> {
         let (nn0, nn1) = (on_wall(a0), on_wall(a1));
         // side triangle to the apex; apex normal averaged from the two edges
         if let Some(p) = Polygon::new(vec![
-            Vertex { pos: b0, normal: nn0 },
-            Vertex { pos: b1, normal: nn1 },
-            Vertex { pos: apex, normal: nn0.add(nn1).norm() },
+            Vertex {
+                pos: b0,
+                normal: nn0,
+            },
+            Vertex {
+                pos: b1,
+                normal: nn1,
+            },
+            Vertex {
+                pos: apex,
+                normal: nn0.add(nn1).norm(),
+            },
         ]) {
             polys.push(p);
         }
@@ -476,11 +497,7 @@ fn sphere(centre: V3, radius: f64, tp: &TessParams) -> Vec<Polygon> {
     let pt = |ilat: usize, ilon: usize| {
         let phi = std::f64::consts::PI * ilat as f64 / n_lat as f64; // 0..π
         let theta = std::f64::consts::TAU * ilon as f64 / n_lon as f64;
-        let nrm = v3(
-            phi.sin() * theta.cos(),
-            phi.sin() * theta.sin(),
-            phi.cos(),
-        );
+        let nrm = v3(phi.sin() * theta.cos(), phi.sin() * theta.sin(), phi.cos());
         (centre.add(nrm.scale(radius)), nrm)
     };
     let mut polys = Vec::new();
@@ -494,14 +511,26 @@ fn sphere(centre: V3, radius: f64, tp: &TessParams) -> Vec<Polygon> {
             // collapsing the degenerate triangle at each pole (north: p00≡p01,
             // south: p10≡p11)
             let mut vs: Vec<Vertex> = vec![
-                Vertex { pos: p00, normal: n00 },
-                Vertex { pos: p10, normal: n10 },
+                Vertex {
+                    pos: p00,
+                    normal: n00,
+                },
+                Vertex {
+                    pos: p10,
+                    normal: n10,
+                },
             ];
             if j + 1 != n_lat {
-                vs.push(Vertex { pos: p11, normal: n11 });
+                vs.push(Vertex {
+                    pos: p11,
+                    normal: n11,
+                });
             }
             if j != 0 {
-                vs.push(Vertex { pos: p01, normal: n01 });
+                vs.push(Vertex {
+                    pos: p01,
+                    normal: n01,
+                });
             }
             if let Some(p) = Polygon::new(vs) {
                 polys.push(p);
@@ -521,10 +550,9 @@ fn torus(f: &Frame, major: f64, minor: f64, tp: &TessParams) -> Vec<Polygon> {
         let v = std::f64::consts::TAU * j as f64 / n_minor as f64; // around tube
         let radial = f.x.scale(u.cos()).add(f.y.scale(u.sin()));
         let nrm = radial.scale(v.cos()).add(f.z.scale(v.sin()));
-        let pos = f
-            .o
-            .add(radial.scale(major + minor * v.cos()))
-            .add(f.z.scale(minor * v.sin()));
+        let pos =
+            f.o.add(radial.scale(major + minor * v.cos()))
+                .add(f.z.scale(minor * v.sin()));
         (pos, nrm)
     };
     let mut polys = Vec::with_capacity(n_major * n_minor);
@@ -535,10 +563,22 @@ fn torus(f: &Frame, major: f64, minor: f64, tp: &TessParams) -> Vec<Polygon> {
             let (p11, n11) = pt((i + 1) % n_major, (j + 1) % n_minor);
             let (p01, n01) = pt(i, (j + 1) % n_minor);
             if let Some(p) = Polygon::new(vec![
-                Vertex { pos: p00, normal: n00 },
-                Vertex { pos: p10, normal: n10 },
-                Vertex { pos: p11, normal: n11 },
-                Vertex { pos: p01, normal: n01 },
+                Vertex {
+                    pos: p00,
+                    normal: n00,
+                },
+                Vertex {
+                    pos: p10,
+                    normal: n10,
+                },
+                Vertex {
+                    pos: p11,
+                    normal: n11,
+                },
+                Vertex {
+                    pos: p01,
+                    normal: n01,
+                },
             ]) {
                 polys.push(p);
             }
@@ -588,7 +628,12 @@ fn eval_operand(sf: &StepFile, id: u32, tp: &TessParams, depth: u32) -> Option<V
         }
         "BLOCK" => {
             let f = placement_frame(sf, p.get(1)?.as_ref_id()?)?;
-            Some(block(&f, p.get(2)?.as_f64()?, p.get(3)?.as_f64()?, p.get(4)?.as_f64()?))
+            Some(block(
+                &f,
+                p.get(2)?.as_f64()?,
+                p.get(3)?.as_f64()?,
+                p.get(4)?.as_f64()?,
+            ))
         }
         "RIGHT_CIRCULAR_CYLINDER" => {
             let f = placement_frame(sf, p.get(1)?.as_ref_id()?)?;
@@ -651,11 +696,7 @@ mod tests {
         let mut v = 0.0;
         for p in polys {
             for i in 1..p.vertices.len() - 1 {
-                let (a, b, c) = (
-                    p.vertices[0].pos,
-                    p.vertices[i].pos,
-                    p.vertices[i + 1].pos,
-                );
+                let (a, b, c) = (p.vertices[0].pos, p.vertices[i].pos, p.vertices[i + 1].pos);
                 v += a.dot(b.cross(c)) / 6.0;
             }
         }
@@ -665,7 +706,10 @@ mod tests {
         Frame::new(o, Some(v3(0., 0., 1.)), Some(v3(1., 0., 0.)))
     }
     fn tp() -> TessParams {
-        TessParams { deflection: 0.005, max_angle: 0.15 }
+        TessParams {
+            deflection: 0.005,
+            max_angle: 0.15,
+        }
     }
 
     #[test]
@@ -685,7 +729,10 @@ mod tests {
 
         let cone_v = vol(&cone(&ident(V3::ZERO), 6.0, 2.0, &tp()));
         let cone_ideal = std::f64::consts::PI * 4.0 * 6.0 / 3.0;
-        assert!((cone_v - cone_ideal).abs() < 0.02 * cone_ideal, "cone {cone_v}");
+        assert!(
+            (cone_v - cone_ideal).abs() < 0.02 * cone_ideal,
+            "cone {cone_v}"
+        );
 
         let tor = vol(&torus(&ident(V3::ZERO), 5.0, 1.5, &tp()));
         let tor_ideal = 2.0 * std::f64::consts::PI.powi(2) * 5.0 * 1.5 * 1.5;
@@ -701,7 +748,10 @@ mod tests {
         // A − B keeps x∈[0,0.5] → 0.5
         assert!((vol(&subtract(&a, &b, eps)) - 0.5).abs() < 1e-6, "subtract");
         // A ∩ B keeps x∈[0.5,1] → 0.5
-        assert!((vol(&intersect(&a, &b, eps)) - 0.5).abs() < 1e-6, "intersect");
+        assert!(
+            (vol(&intersect(&a, &b, eps)) - 0.5).abs() < 1e-6,
+            "intersect"
+        );
         // A ∪ B = 2 − overlap → 1.5
         assert!((vol(&union(&a, &b, eps)) - 1.5).abs() < 1e-6, "union");
     }
@@ -715,6 +765,9 @@ mod tests {
         let v = vol(&r);
         assert!(v > 0.0, "result must stay outward-oriented (v={v})");
         let ideal = 1000.0 - std::f64::consts::PI * 9.0 * 10.0;
-        assert!((v - ideal).abs() < 0.02 * ideal, "drilled volume {v} vs {ideal}");
+        assert!(
+            (v - ideal).abs() < 0.02 * ideal,
+            "drilled volume {v} vs {ideal}"
+        );
     }
 }

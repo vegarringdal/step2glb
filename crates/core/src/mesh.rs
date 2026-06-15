@@ -172,7 +172,15 @@ impl TriMesh {
     /// vertex-fetch optimization. Without normals, welding is by position
     /// alone (face-boundary vertices merge too).
     pub fn optimize(&mut self) {
-        // meshoptimizer's vertex-cache / fetch passes assume triangle indices
+        // meshoptimizer's vertex-cache / fetch passes assume triangle indices.
+        // Without the `optimize` feature this is a no-op — the mesh stays valid,
+        // just un-welded (larger). Lets the wasm / capi builds drop the C++ dep.
+        #[cfg(feature = "optimize")]
+        self.optimize_meshopt();
+    }
+
+    #[cfg(feature = "optimize")]
+    fn optimize_meshopt(&mut self) {
         if self.is_empty() || self.lines {
             return;
         }
@@ -230,6 +238,15 @@ impl TriMesh {
     /// Unlike [`TriMesh::cleanup_positions`] this keeps normals: surviving
     /// vertices are untouched, collapsed-away ones are removed.
     pub fn simplify(&mut self, threshold: f32, target_error: f32) {
+        // no simplification without the meshoptimizer dependency
+        #[cfg(not(feature = "optimize"))]
+        let _ = (threshold, target_error);
+        #[cfg(feature = "optimize")]
+        self.simplify_meshopt(threshold, target_error);
+    }
+
+    #[cfg(feature = "optimize")]
+    fn simplify_meshopt(&mut self, threshold: f32, target_error: f32) {
         if self.is_empty() || self.lines {
             return;
         }
@@ -313,18 +330,24 @@ impl TriMesh {
             idx.push(ni);
         }
 
-        // 2) meshopt simplification toward threshold * index_count
-        let target = (idx.len() as f32 * threshold) as usize;
-        let adapter =
-            meshopt::VertexDataAdapter::new(as_bytes(&pos), 12, 0).expect("vertex adapter");
-        let idx = meshopt::simplify(
-            &idx,
-            &adapter,
-            target,
-            target_error,
-            meshopt::SimplifyOptions::LockBorder,
-            None,
-        );
+        // 2) meshopt simplification toward threshold * index_count (skipped
+        //    without the `optimize` feature; the weld + degenerate drop remain)
+        #[cfg(feature = "optimize")]
+        let idx = {
+            let target = (idx.len() as f32 * threshold) as usize;
+            let adapter =
+                meshopt::VertexDataAdapter::new(as_bytes(&pos), 12, 0).expect("vertex adapter");
+            meshopt::simplify(
+                &idx,
+                &adapter,
+                target,
+                target_error,
+                meshopt::SimplifyOptions::LockBorder,
+                None,
+            )
+        };
+        #[cfg(not(feature = "optimize"))]
+        let _ = (threshold, target_error);
 
         // 3) drop degenerate triangles (repeated index, coincident positions,
         //    near-zero area) and 4) compact the pool to first-use order
@@ -383,6 +406,7 @@ impl TriMesh {
 
 /// Shared meshoptimizer pass: weld identical vertices, drop the degenerate
 /// triangles welding produces, then vertex-cache and vertex-fetch optimize.
+#[cfg(feature = "optimize")]
 fn meshopt_pipeline<T: Clone + Copy + Default>(verts: &[T], indices: &[u32]) -> (Vec<T>, Vec<u32>) {
     // 1) weld identical vertices
     let (unique, remap) = meshopt::generate_vertex_remap(verts, Some(indices));
@@ -447,7 +471,13 @@ impl MeshSet {
         {
             return &mut self.parts[i].1;
         }
-        self.parts.push((color, TriMesh { lines: true, ..Default::default() }));
+        self.parts.push((
+            color,
+            TriMesh {
+                lines: true,
+                ..Default::default()
+            },
+        ));
         &mut self.parts.last_mut().unwrap().1
     }
 
@@ -599,10 +629,7 @@ mod tests {
         assert!(m.normals.is_empty());
         assert_eq!(m.vertex_count(), 4, "position-only weld merges corners");
         assert_eq!(m.triangle_count(), 2);
-        assert!(m
-            .indices
-            .iter()
-            .all(|&i| (i as usize) < m.vertex_count()));
+        assert!(m.indices.iter().all(|&i| (i as usize) < m.vertex_count()));
     }
 
     #[test]
@@ -612,7 +639,7 @@ mod tests {
         // (10^-3): bit-exact welding misses them, quantized welding must not
         m.positions[9] += 2e-4; // dup of v0
         m.positions[13] += 2e-4; // dup of v2
-        // a sliver that collapses to zero area on the grid
+                                 // a sliver that collapses to zero area on the grid
         m.indices.extend_from_slice(&[0, 3, 0]);
 
         m.cleanup_positions(3, 1.0, 0.0);
@@ -620,10 +647,7 @@ mod tests {
         assert!(m.normals.is_empty(), "cleanup drops normals");
         assert_eq!(m.vertex_count(), 4, "near-duplicates weld on the grid");
         assert_eq!(m.triangle_count(), 2, "degenerate sliver dropped");
-        assert!(m
-            .indices
-            .iter()
-            .all(|&i| (i as usize) < m.vertex_count()));
+        assert!(m.indices.iter().all(|&i| (i as usize) < m.vertex_count()));
     }
 
     /// A dense flat grid: simplification can collapse interior vertices
@@ -653,10 +677,7 @@ mod tests {
         m.cleanup_positions(3, 0.5, 0.01);
         assert!(m.triangle_count() < before, "flat grid must simplify");
         assert_eq!(m.indices.len() % 3, 0);
-        assert!(m
-            .indices
-            .iter()
-            .all(|&i| (i as usize) < m.vertex_count()));
+        assert!(m.indices.iter().all(|&i| (i as usize) < m.vertex_count()));
     }
 
     #[test]
@@ -673,10 +694,7 @@ mod tests {
         for n in m.normals.chunks(3) {
             assert!((n[2] - 1.0).abs() < 1e-6, "normal {:?}", n);
         }
-        assert!(m
-            .indices
-            .iter()
-            .all(|&i| (i as usize) < m.vertex_count()));
+        assert!(m.indices.iter().all(|&i| (i as usize) < m.vertex_count()));
     }
 
     #[test]

@@ -64,6 +64,7 @@ pub fn build(
     asm: &Assembly,
     opts: MergeOptions,
     stats: &mut TessStats,
+    progress: &mut dyn FnMut(u32),
 ) -> (MergedBuilder, usize) {
     let mut base = M4::scale_uniform(opts.unit_scale);
     if opts.rotate_z_up {
@@ -74,6 +75,8 @@ pub fn build(
         asm,
         opts,
         stats,
+        progress,
+        processed: 0,
         cache: HashMap::new(),
         out: MergedBuilder::default(),
         next_id: 1,
@@ -135,6 +138,9 @@ struct Walk<'a, 'b> {
     asm: &'a Assembly,
     opts: MergeOptions,
     stats: &'b mut TessStats,
+    /// per-node progress hook (running count of product nodes visited)
+    progress: &'b mut dyn FnMut(u32),
+    processed: u32,
     /// tessellated once per PRODUCT_DEFINITION; instances clone + transform
     cache: HashMap<u32, Option<MeshSet>>,
     out: MergedBuilder,
@@ -199,7 +205,8 @@ impl Walk<'_, '_> {
                 // then scale the geometry into the global unit — so a
                 // metre-context part in an otherwise-mm file is neither shrunk
                 // away nor under-tessellated.
-                let factor = crate::model::rep_unit_factor(self.cx.sf, sr, self.opts.file_unit_scale);
+                let factor =
+                    crate::model::rep_unit_factor(self.cx.sf, sr, self.opts.file_unit_scale);
                 let rep_tp = crate::model::TessParams {
                     deflection: self.cx.tp.deflection / factor,
                     max_angle: self.cx.tp.max_angle,
@@ -227,6 +234,11 @@ impl Walk<'_, '_> {
             }
         }
         prepare(&mut tm, &self.opts);
+        // tick after the product is actually tessellated (a cache miss = one
+        // unique product's worth of work just finished), so progress never
+        // shows 100% while a product's faces are still being tessellated
+        self.processed += 1;
+        (self.progress)(self.processed);
         let result = if tm.is_empty() { None } else { Some(tm) };
         self.cache.insert(pd, result.clone());
         result

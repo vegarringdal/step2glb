@@ -246,8 +246,13 @@ pub fn tessellate_item(
         }
         // constructive solid geometry: mesh the primitives and evaluate the
         // boolean tree (union / difference / intersection) into one mesh
-        "CSG_SOLID" | "BOOLEAN_RESULT" | "BLOCK" | "RIGHT_CIRCULAR_CYLINDER"
-        | "RIGHT_CIRCULAR_CONE" | "SPHERE" | "TORUS" => {
+        "CSG_SOLID"
+        | "BOOLEAN_RESULT"
+        | "BLOCK"
+        | "RIGHT_CIRCULAR_CYLINDER"
+        | "RIGHT_CIRCULAR_CONE"
+        | "SPHERE"
+        | "TORUS" => {
             match crate::csg::eval_csg(sf, id, cx.tp) {
                 Some(mesh) if !mesh.is_empty() => {
                     out.bucket(color).append(&mesh);
@@ -270,7 +275,10 @@ pub fn tessellate_item(
             // a representation item we do not tessellate at all — record it so a
             // silently-empty item (e.g. GEOMETRIC_SET, SWEPT_AREA_SOLID, an
             // AP242-ed2 TRIANGULATED_FACE) is surfaced rather than vanishing
-            *stats.unsupported_items.entry(other.to_string()).or_insert(0) += 1;
+            *stats
+                .unsupported_items
+                .entry(other.to_string())
+                .or_insert(0) += 1;
             false
         }
     }
@@ -335,8 +343,12 @@ pub fn split_units(sf: &StepFile, item: u32, level: SplitLevel) -> Vec<u32> {
             }
             if ty == "BREP_WITH_VOIDS" {
                 if let Some(voids) = p.get(2).and_then(|x| x.as_list()) {
-                    v.extend(voids.iter().filter_map(|x| x.as_ref_id())
-                        .map(|r| resolve_oriented_shell(sf, r)));
+                    v.extend(
+                        voids
+                            .iter()
+                            .filter_map(|x| x.as_ref_id())
+                            .map(|r| resolve_oriented_shell(sf, r)),
+                    );
                 }
             }
         }
@@ -364,7 +376,10 @@ pub fn split_units(sf: &StepFile, item: u32, level: SplitLevel) -> Vec<u32> {
         }
         v
     };
-    let is_solid = matches!(ty, "MANIFOLD_SOLID_BREP" | "FACETED_BREP" | "BREP_WITH_VOIDS");
+    let is_solid = matches!(
+        ty,
+        "MANIFOLD_SOLID_BREP" | "FACETED_BREP" | "BREP_WITH_VOIDS"
+    );
     let is_model = matches!(ty, "SHELL_BASED_SURFACE_MODEL" | "FACE_BASED_SURFACE_MODEL");
     match level {
         SplitLevel::Solid => {
@@ -825,7 +840,8 @@ fn surface_is_planar(surf: &Surface) -> bool {
             }
             let n = normal.norm();
             let span = cps.iter().map(|p| p.sub(o).len()).fold(0.0_f64, f64::max);
-            cps.iter().all(|p| p.sub(o).dot(n).abs() <= 1e-3 * span + 1e-6)
+            cps.iter()
+                .all(|p| p.sub(o).dot(n).abs() <= 1e-3 * span + 1e-6)
         }
         _ => false,
     }
@@ -899,8 +915,7 @@ fn face_to_mesh(
             .collect(),
         _ => Vec::new(),
     };
-    let singular =
-        |p: crate::geom::V3| cap_pts.iter().any(|c| p.sub(*c).len() < eps_cap);
+    let singular = |p: crate::geom::V3| cap_pts.iter().any(|c| p.sub(*c).len() < eps_cap);
 
     // 1) map loops to UV with periodic unwrapping; Newton surfaces are seeded
     // from the previous boundary point for continuity and speed.
@@ -1166,7 +1181,11 @@ fn complement_interior(contours: &[Vec<[f64; 2]>]) -> bool {
         ]
     };
     let outer = (0..contours.len())
-        .max_by(|&a, &b| poly_area(&contours[a]).abs().total_cmp(&poly_area(&contours[b]).abs()))
+        .max_by(|&a, &b| {
+            poly_area(&contours[a])
+                .abs()
+                .total_cmp(&poly_area(&contours[b]).abs())
+        })
         .unwrap();
     (0..contours.len())
         .any(|k| k != outer && !point_in_poly(centroid(&contours[k]), &contours[outer]))
@@ -1207,12 +1226,7 @@ fn tessellate_periodic_complement(
         }
     }
     let u0 = umin - 1e-6;
-    let band = vec![
-        [u0, vlo],
-        [u0 + per_u, vlo],
-        [u0 + per_u, vhi],
-        [u0, vhi],
-    ];
+    let band = vec![[u0, vlo], [u0 + per_u, vlo], [u0 + per_u, vhi], [u0, vhi]];
     let mut all: Vec<Vec<[f64; 2]>> = Vec::with_capacity(contours.len() + 1);
     all.push(band);
     all.extend(contours.iter().cloned());
@@ -1322,12 +1336,11 @@ fn emit_uv_region(
         metric_scale(surf, umin, umax, vmin, vmax)
     };
 
-    let (verts_uv, tris) = match run_tess2(loops_uv, su, sv)
-        .or_else(|| tess2_with_shrunk_holes(loops_uv, su, sv))
-    {
-        Some(r) => r,
-        None => return false,
-    };
+    let (verts_uv, tris) =
+        match run_tess2(loops_uv, su, sv).or_else(|| tess2_with_shrunk_holes(loops_uv, su, sv)) {
+            Some(r) => r,
+            None => return false,
+        };
     refine_and_emit(surf, verts_uv, tris, su, sv, tp, same_sense, mesh);
     true
 }
@@ -1480,7 +1493,10 @@ fn full_patch_rect(surf: &Surface, contours: &[Vec<[f64; 2]>]) -> Option<((f64, 
 /// The full knot domain `((u0,u1),(v0,v1))` if `contours` is a single boundary
 /// that spans (nearly) the whole domain of a B-spline in both directions — i.e.
 /// the face is the entire parametric patch, not a trimmed sub-region.
-fn full_domain_bspline(surf: &Surface, contours: &[Vec<[f64; 2]>]) -> Option<((f64, f64), (f64, f64))> {
+fn full_domain_bspline(
+    surf: &Surface,
+    contours: &[Vec<[f64; 2]>],
+) -> Option<((f64, f64), (f64, f64))> {
     let b = match surf {
         Surface::BSpline(b) => b,
         _ => return None,
@@ -1513,7 +1529,10 @@ fn full_domain_bspline(surf: &Surface, contours: &[Vec<[f64; 2]>]) -> Option<((f
 /// miss (|w|>1) — and the full extent in the other. The face is then the entire
 /// closed tube / strip (e.g. a coil), so grid the full domain (fold-free)
 /// instead of feeding tess2 a multi-winding contour it folds into soup.
-fn full_wrap_bspline(surf: &Surface, contours: &[Vec<[f64; 2]>]) -> Option<((f64, f64), (f64, f64))> {
+fn full_wrap_bspline(
+    surf: &Surface,
+    contours: &[Vec<[f64; 2]>],
+) -> Option<((f64, f64), (f64, f64))> {
     let b = match surf {
         Surface::BSpline(b) => b,
         _ => return None,
@@ -1674,20 +1693,52 @@ pub fn install_panic_guard() {
 /// tess2 output in UV space: (vertices, triangle index triples).
 type Tess2Out = (Vec<[f64; 2]>, Vec<[u32; 3]>);
 
+/// Build tess2's flat (scaled) contour, dropping consecutive coincident points
+/// and the closing duplicate. Zero-length edges are the classic trigger for
+/// tess2's sweep-line robustness failures (it `unwrap()`s a freed region and
+/// panics) — and on wasm a panic aborts the whole module (no `catch_unwind`),
+/// so sanitizing the input here is the only way to keep a degenerate boundary
+/// from killing the conversion. Returns `None` for fewer than 3 distinct points.
+fn sanitize_contour(l: &[[f64; 2]], su: f64, sv: f64) -> Option<Vec<f64>> {
+    if l.len() < 3 {
+        return None;
+    }
+    let (mut w, mut h) = (0.0f64, 0.0f64);
+    for p in l {
+        w = w.max((p[0] * su).abs());
+        h = h.max((p[1] * sv).abs());
+    }
+    let eps = 1e-9 * w.max(h).max(1.0);
+    let mut flat: Vec<f64> = Vec::with_capacity(l.len() * 2);
+    for p in l {
+        let (x, y) = (p[0] * su, p[1] * sv);
+        if flat.len() >= 2 {
+            let (lx, ly) = (flat[flat.len() - 2], flat[flat.len() - 1]);
+            if (x - lx).abs() <= eps && (y - ly).abs() <= eps {
+                continue; // coincident with previous → zero-length edge
+            }
+        }
+        flat.push(x);
+        flat.push(y);
+    }
+    // drop a closing duplicate (first ≈ last)
+    if flat.len() >= 4 {
+        let n = flat.len();
+        if (flat[0] - flat[n - 2]).abs() <= eps && (flat[1] - flat[n - 1]).abs() <= eps {
+            flat.truncate(n - 2);
+        }
+    }
+    (flat.len() >= 6).then_some(flat) // ≥ 3 distinct points
+}
+
 fn run_tess2(loops_uv: &[Vec<[f64; 2]>], su: f64, sv: f64) -> Option<Tess2Out> {
     TESS_GUARD.with(|g| g.set(true));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut tess = Tessellator::new();
         for l in loops_uv {
-            if l.len() < 3 {
-                continue;
+            if let Some(flat) = sanitize_contour(l, su, sv) {
+                tess.add_contour(2, &flat);
             }
-            let mut flat: Vec<f64> = Vec::with_capacity(l.len() * 2);
-            for p in l {
-                flat.push(p[0] * su);
-                flat.push(p[1] * sv);
-            }
-            tess.add_contour(2, &flat);
         }
         if !tess.tessellate(WindingRule::Odd, ElementType::Polygons, 3, 2, None) {
             return None;
@@ -2221,7 +2272,12 @@ fn tessellate_triangulated_set(sf: &StepFile, id: u32, mesh: &mut TriMesh, compl
     let pnindex: Vec<u32> = p
         .get(4 + off)
         .and_then(|v| v.as_list())
-        .map(|l| l.iter().filter_map(|v| v.as_i64()).map(|v| v as u32).collect())
+        .map(|l| {
+            l.iter()
+                .filter_map(|v| v.as_i64())
+                .map(|v| v as u32)
+                .collect()
+        })
         .unwrap_or_default();
     let map_idx = |i: u32| -> Option<u32> {
         let i = i.checked_sub(1)?; // STEP is 1-based
@@ -2239,7 +2295,12 @@ fn tessellate_triangulated_set(sf: &StepFile, id: u32, mesh: &mut TriMesh, compl
             .map(|ls| {
                 ls.iter()
                     .filter_map(|s| s.as_list())
-                    .map(|s| s.iter().filter_map(|v| v.as_i64()).map(|v| v as u32).collect())
+                    .map(|s| {
+                        s.iter()
+                            .filter_map(|v| v.as_i64())
+                            .map(|v| v as u32)
+                            .collect()
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -2370,7 +2431,11 @@ mod tests {
         let mut cps = Vec::new();
         for iu in 0..2 {
             for k in 0..nv {
-                cps.push(v3(2.0 * k as f64, 40.0 * (0.4 * k as f64).sin(), iu as f64 * width));
+                cps.push(v3(
+                    2.0 * k as f64,
+                    40.0 * (0.4 * k as f64).sin(),
+                    iu as f64 * width,
+                ));
             }
         }
         let mut knots_v = vec![0.0; deg_v + 1];
@@ -2408,7 +2473,10 @@ mod tests {
         let ((u0, u1), (v0, v1)) = domain(s);
         let (nu, nv) = (8usize, 4000usize);
         let pt = |i: usize, j: usize| {
-            s.point(u0 + (u1 - u0) * i as f64 / nu as f64, v0 + (v1 - v0) * j as f64 / nv as f64)
+            s.point(
+                u0 + (u1 - u0) * i as f64 / nu as f64,
+                v0 + (v1 - v0) * j as f64 / nv as f64,
+            )
         };
         let mut a = 0.0;
         for j in 0..nv {
@@ -2441,7 +2509,10 @@ mod tests {
         let ((u0, u1), (v0, v1)) = domain(&s);
         // the face boundary covers the whole knot domain (rails + caps)
         let contour = vec![vec![[u0, v0], [u1, v0], [u1, v1], [u0, v1]]];
-        let tp = TessParams { deflection: 0.1, max_angle: 20.0_f64.to_radians() };
+        let tp = TessParams {
+            deflection: 0.1,
+            max_angle: 20.0_f64.to_radians(),
+        };
         let mut mesh = TriMesh::default();
         assert!(
             tessellate_full_patch(&s, &contour, &tp, true, &mut mesh),
@@ -2451,7 +2522,10 @@ mod tests {
         // The decisive anti-garbage check: triangles that bridge across folds
         // (tess2's failure mode here, and what the pre-fix path produced) add
         // huge spurious area — the broken mesh measured ~800x the true area.
-        assert!((got - want).abs() < 0.02 * want, "gridded area {got} vs reference {want}");
+        assert!(
+            (got - want).abs() < 0.02 * want,
+            "gridded area {got} vs reference {want}"
+        );
         // and it must actually have gridded the strip, not collapsed to a few
         // spanning triangles
         assert!(mesh.indices.len() / 3 > 100, "implausibly few triangles");
@@ -2459,7 +2533,10 @@ mod tests {
         for c in mesh.positions.chunks(3) {
             let p = v3(c[0] as f64, c[1] as f64, c[2] as f64);
             let (u, v) = s.uv(p, None);
-            assert!(s.point(u, v).sub(p).len() < 1e-2, "off-surface vertex {p:?}");
+            assert!(
+                s.point(u, v).sub(p).len() < 1e-2,
+                "off-surface vertex {p:?}"
+            );
         }
     }
 
@@ -2474,7 +2551,11 @@ mod tests {
         let elsewhere = vec![[10.0, 1.0], [11.0, 1.0], [11.0, 2.0], [10.0, 2.0]];
         assert!(complement_interior(&[outer, elsewhere]));
         // a single loop is never a complement boundary
-        assert!(!complement_interior(&[vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]]));
+        assert!(!complement_interior(&[vec![
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 1.0]
+        ]]));
     }
 
     #[test]
@@ -2525,6 +2606,44 @@ mod tests {
     }
 
     #[test]
+    fn patched_tess2_fails_soft_without_panicking() {
+        // Drive the (vendored, fail-soft) tess2 directly — bypassing run_tess2's
+        // catch_unwind — with degenerate / self-intersecting contours that
+        // stress the sweep. The patch must make it return a bool (success or a
+        // clean failure) rather than panicking on a freed region; on wasm a
+        // panic here would abort the whole module.
+        use tess2_rust::{ElementType, Tessellator, WindingRule};
+        let nasty: &[&[f64]] = &[
+            &[0., 0., 1., 1., 1., 0., 0., 1., 0., 0.], // self-intersecting bowtie
+            &[0., 0., 0., 0., 1., 0., 1., 0., 0., 1.], // repeated/coincident verts
+            &[0., 0., 1., 0., 2., 0., 3., 0.],         // fully collinear (zero area)
+        ];
+        for c in nasty {
+            let mut t = Tessellator::new();
+            t.add_contour(2, c);
+            // the assertion is simply that this call returns at all
+            let _ = t.tessellate(WindingRule::Odd, ElementType::Polygons, 3, 2, None);
+        }
+    }
+
+    #[test]
+    fn sanitize_contour_drops_zero_length_edges() {
+        // a square with a repeated vertex and a closing duplicate
+        let c = vec![
+            [0.0, 0.0],
+            [0.0, 0.0], // coincident with previous
+            [1.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 1.0],
+            [0.0, 0.0], // closing duplicate of the first
+        ];
+        let flat = sanitize_contour(&c, 1.0, 1.0).expect("4 distinct corners");
+        assert_eq!(flat.len(), 8, "4 distinct points × 2 coords");
+        // an all-coincident contour has no area → dropped
+        assert!(sanitize_contour(&[[5.0, 5.0], [5.0, 5.0], [5.0, 5.0]], 1.0, 1.0).is_none());
+    }
+
+    #[test]
     fn full_patch_gate_grids_a_rectangular_sub_patch() {
         // A rectangle covering only the first 30% of v is still a valid
         // (sub-)rectangular patch: gridding its bbox reproduces it, so the gate
@@ -2533,7 +2652,10 @@ mod tests {
         let ((u0, u1), (v0, v1)) = domain(&s);
         let vm = v0 + 0.3 * (v1 - v0);
         let contour = vec![vec![[u0, v0], [u1, v0], [u1, vm], [u0, vm]]];
-        let tp = TessParams { deflection: 0.1, max_angle: 20.0_f64.to_radians() };
+        let tp = TessParams {
+            deflection: 0.1,
+            max_angle: 20.0_f64.to_radians(),
+        };
         let mut mesh = TriMesh::default();
         assert!(tessellate_full_patch(&s, &contour, &tp, true, &mut mesh));
         assert!(mesh.indices.len() / 3 > 50, "should grid the sub-rectangle");
@@ -2548,13 +2670,19 @@ mod tests {
         let ((u0, u1), (v0, v1)) = domain(&s);
         let (um, vm) = (u0 + 0.5 * (u1 - u0), v0 + 0.5 * (v1 - v0));
         let contour = vec![vec![[u0, v0], [um, v0], [u0, vm]]]; // triangle in a quarter
-        let tp = TessParams { deflection: 0.1, max_angle: 20.0_f64.to_radians() };
+        let tp = TessParams {
+            deflection: 0.1,
+            max_angle: 20.0_f64.to_radians(),
+        };
         let mut mesh = TriMesh::default();
         assert!(
             !tessellate_full_patch(&s, &contour, &tp, true, &mut mesh),
             "a non-rectangular sub-region must not be grid-filled"
         );
-        assert!(mesh.indices.is_empty(), "rejected gate must not emit geometry");
+        assert!(
+            mesh.indices.is_empty(),
+            "rejected gate must not emit geometry"
+        );
     }
 
     #[test]
@@ -2645,11 +2773,9 @@ mod tests {
         // an ordinary open tube has no collapsed row
         assert!(!bspline_has_v_pole(&mk(false)));
         // analytic surfaces are not B-splines: no pole reported here
-        assert!(!bspline_has_v_pole(&Surface::Plane(crate::geom::Frame::new(
-            V3::ZERO,
-            None,
-            None
-        ))));
+        assert!(!bspline_has_v_pole(&Surface::Plane(
+            crate::geom::Frame::new(V3::ZERO, None, None)
+        )));
     }
 
     #[test]
