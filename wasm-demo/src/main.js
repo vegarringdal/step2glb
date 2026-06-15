@@ -33,9 +33,34 @@ memEl.addEventListener('input', () => {
   memValEl.textContent = memEl.value;
 });
 
-const worker = new Worker(new URL('./worker.js', import.meta.url), {
-  type: 'module',
-});
+// A wasm module's linear memory only ever grows — it is never returned to the
+// OS while the instance lives. So instead of one long-lived worker we spawn a
+// fresh one per job and terminate it when the job ends: killing the worker
+// discards the whole wasm instance, and the browser reclaims all of its memory
+// before the next conversion starts from a small, fresh heap.
+function runWorker(job, onProgress) {
+  return new Promise((resolve) => {
+    const w = new Worker(new URL('./worker.js', import.meta.url), {
+      type: 'module',
+    });
+    const finish = (msg) => {
+      w.terminate();
+      resolve(msg);
+    };
+    w.onmessage = (e) => {
+      const m = e.data;
+      // progress ticks arrive during a (blocked) streaming conversion
+      if (m.progress) {
+        onProgress?.(m.progress);
+        return;
+      }
+      finish(m); // ready / result / error are all terminal — one msg per worker
+    };
+    w.onerror = (err) =>
+      finish({ ok: false, error: String(err?.message || err) });
+    w.postMessage(job);
+  });
+}
 
 let current = null; // { inputPath, outputPath, displayName, glbUrl }
 let busy = false;
@@ -100,22 +125,17 @@ async function convert(displayName, bytes) {
     ? `streaming via OPFS${mergedEl.checked ? ', hierarchical to bound memory' : ''}`
     : 'in memory';
   statusEl.textContent = `converting ${displayName}… (${mode})`;
-  worker.postMessage({ inputPath, outputPath, displayName, opts, streaming });
-}
 
-worker.onmessage = async (e) => {
-  const m = e.data;
-  if (m.ready) {
-    statusEl.textContent = `${m.version} — ready`;
-    return;
-  }
-  // progress ticks arrive during a (blocked) streaming conversion
-  if (m.progress) {
-    const { done, total } = m.progress;
-    const pct = total ? Math.round((100 * done) / total) : 0;
-    statusEl.textContent = `converting ${current?.displayName ?? ''}… ${pct}% (${done}/${total})`;
-    return;
-  }
+  // spawn a throwaway worker for just this conversion; it is terminated (and
+  // its wasm memory reclaimed) the moment we get a result back.
+  const m = await runWorker(
+    { inputPath, outputPath, displayName, opts, streaming },
+    ({ done, total }) => {
+      const pct = total ? Math.round((100 * done) / total) : 0;
+      statusEl.textContent = `converting ${displayName}… ${pct}% (${done}/${total})`;
+    },
+  );
+
   busy = false;
   sampleBtn.disabled = false;
 
@@ -147,7 +167,7 @@ worker.onmessage = async (e) => {
     current.outputPath = null;
     downloadBtn.disabled = true;
   };
-};
+}
 
 function table(title, obj) {
   const keys = Object.keys(obj || {});
@@ -198,4 +218,7 @@ window.addEventListener('beforeunload', () => {
   }
 });
 
-worker.postMessage({ init: true }); // warm up wasm, report version
+// probe the version once at load (its worker is terminated immediately after)
+runWorker({ init: true }).then((m) => {
+  if (m.ready) statusEl.textContent = `${m.version} — ready`;
+});
