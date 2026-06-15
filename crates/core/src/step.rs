@@ -88,8 +88,32 @@ impl P {
     }
 }
 
+/// Backing store for the raw STEP bytes. Both variants hand out a borrowable
+/// `&[u8]`, so the whole zero-copy parser is agnostic to where the bytes live:
+/// an owned buffer (read into RAM, or fed via an [`crate::io::InputHandle`]) or
+/// a memory map (native, files larger than RAM — paged by the OS).
+#[derive(Default)]
+enum Source {
+    #[default]
+    Empty,
+    Owned(Vec<u8>),
+    #[cfg(feature = "mmap")]
+    Mmap(memmap2::Mmap),
+}
+
+impl Source {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Source::Empty => &[],
+            Source::Owned(v) => v,
+            #[cfg(feature = "mmap")]
+            Source::Mmap(m) => &m[..],
+        }
+    }
+}
+
 pub struct StepFile {
-    pub data: Vec<u8>,
+    source: Source,
     pub entities: HashMap<u32, EntityRec>,
     /// type id -> entity ids, for fast "find all NAUO" style queries.
     pub by_type: HashMap<u32, Vec<u32>>,
@@ -100,9 +124,49 @@ pub struct StepFile {
 }
 
 impl StepFile {
+    /// Parse from an owned byte buffer (the bytes are held in RAM).
     pub fn parse(data: Vec<u8>) -> Result<StepFile, String> {
+        Self::from_source(Source::Owned(data))
+    }
+
+    /// Read the whole input through a [`crate::io::InputHandle`] into RAM and
+    /// parse it — the path the wasm / C-ABI shells use (e.g. an OPFS sync
+    /// handle), where there is no borrowable backing to map.
+    pub fn from_input(input: &dyn crate::io::InputHandle) -> Result<StepFile, String> {
+        let size = input.size() as usize;
+        let mut data = vec![0u8; size];
+        let mut off = 0usize;
+        while off < size {
+            match input.read_at(off as u64, &mut data[off..]) {
+                Ok(0) => break,
+                Ok(n) => off += n,
+                Err(e) => return Err(format!("input read failed: {e}")),
+            }
+        }
+        data.truncate(off);
+        Self::parse(data)
+    }
+
+    /// Memory-map a STEP file from disk and parse it — only touched pages are
+    /// resident, so files larger than RAM work (native only). Falls back to a
+    /// plain read for inputs that cannot be mapped (e.g. empty files).
+    #[cfg(feature = "mmap")]
+    pub fn open(path: &std::path::Path) -> Result<StepFile, String> {
+        let file = std::fs::File::open(path).map_err(|e| format!("cannot open {path:?}: {e}"))?;
+        // SAFETY: the file is not mutated for the lifetime of the map; a
+        // concurrent external truncation is the documented mmap caveat.
+        match unsafe { memmap2::Mmap::map(&file) } {
+            Ok(map) => Self::from_source(Source::Mmap(map)),
+            Err(_) => {
+                let data = std::fs::read(path).map_err(|e| format!("cannot read {path:?}: {e}"))?;
+                Self::parse(data)
+            }
+        }
+    }
+
+    fn from_source(source: Source) -> Result<StepFile, String> {
         let mut sf = StepFile {
-            data,
+            source,
             entities: HashMap::new(),
             by_type: HashMap::new(),
             type_names: Vec::new(),
@@ -112,6 +176,16 @@ impl StepFile {
         };
         sf.index()?;
         Ok(sf)
+    }
+
+    /// The raw backing bytes (owned buffer or memory map).
+    fn raw(&self) -> &[u8] {
+        self.source.as_slice()
+    }
+
+    /// Size of the backing STEP bytes.
+    pub fn byte_len(&self) -> usize {
+        self.raw().len()
     }
 
     pub fn type_id(&self, name: &str) -> Option<u32> {
@@ -152,7 +226,10 @@ impl StepFile {
     // ---------------------------------------------------------------- index
 
     fn index(&mut self) -> Result<(), String> {
-        let data = std::mem::take(&mut self.data);
+        // Take the source out so the scan can borrow its bytes while the index
+        // maps are filled (`intern` mutates `self`); restored at the end.
+        let src = std::mem::take(&mut self.source);
+        let data = src.as_slice();
         let n = data.len();
         let mut i;
 
@@ -229,7 +306,7 @@ impl StepFile {
             i += 1;
         }
 
-        self.data = data;
+        self.source = src;
         Ok(())
     }
 
@@ -238,7 +315,7 @@ impl StepFile {
     /// Lazily parse the parameter list of a simple entity.
     pub fn params(&self, id: u32) -> Option<Vec<P>> {
         let rec = self.entities.get(&id)?;
-        let slice = &self.data[rec.start as usize..rec.end as usize];
+        let slice = &self.raw()[rec.start as usize..rec.end as usize];
         Some(parse_param_list(slice))
     }
 
@@ -250,7 +327,7 @@ impl StepFile {
         if self.type_name(rec.ty) != TYPE_COMPLEX {
             return None;
         }
-        let slice = &self.data[rec.start as usize..rec.end as usize];
+        let slice = &self.raw()[rec.start as usize..rec.end as usize];
         let mut i = 0usize;
         let n = slice.len();
         while i < n {
@@ -290,7 +367,7 @@ impl StepFile {
             Some(r) if self.type_name(r.ty) == TYPE_COMPLEX => *r,
             _ => return out,
         };
-        let slice = &self.data[rec.start as usize..rec.end as usize];
+        let slice = &self.raw()[rec.start as usize..rec.end as usize];
         let mut i = 0usize;
         let n = slice.len();
         while i < n {
@@ -342,7 +419,7 @@ impl StepFile {
     /// Raw bytes of the HEADER section (for unit sniffing etc.)
     #[allow(dead_code)]
     pub fn header(&self) -> &[u8] {
-        &self.data[self.header_range.0..self.header_range.1]
+        &self.raw()[self.header_range.0..self.header_range.1]
     }
 
     /// Reconstruct the Part-21 source line for one entity from its indexed
@@ -350,7 +427,7 @@ impl StepFile {
     /// complex instance. Used by `--debug-print` to re-emit failing faces.
     pub fn entity_source(&self, id: u32) -> Option<String> {
         let rec = self.entities.get(&id)?;
-        let body = std::str::from_utf8(&self.data[rec.start as usize..rec.end as usize])
+        let body = std::str::from_utf8(&self.raw()[rec.start as usize..rec.end as usize])
             .ok()?
             .trim();
         let ty = self.entity_type(id)?;
@@ -369,7 +446,7 @@ impl StepFile {
             Some(r) => r,
             None => return Vec::new(),
         };
-        let body = &self.data[rec.start as usize..rec.end as usize];
+        let body = &self.raw()[rec.start as usize..rec.end as usize];
         let mut out = Vec::new();
         let mut i = 0;
         while i < body.len() {
@@ -684,12 +761,23 @@ END-ISO-10303-21;
     }
 
     #[test]
+    fn from_input_handle_matches_owned_parse() {
+        // a Vec<u8> is an InputHandle; parsing through the handle (the wasm /
+        // capi path) must produce the same index as parsing the owned buffer
+        let src = b"DATA;\n#1=CARTESIAN_POINT('',(1.,2.,3.));\nENDSEC;".to_vec();
+        let via_handle = StepFile::from_input(&src).expect("from_input");
+        let via_owned = StepFile::parse(src.clone()).expect("parse");
+        assert_eq!(via_handle.entities.len(), via_owned.entities.len());
+        assert_eq!(via_handle.entity_type(1), Some("CARTESIAN_POINT"));
+        assert_eq!(via_handle.byte_len(), src.len());
+        assert_eq!(via_handle.params(1).unwrap()[1].as_list().unwrap().len(), 3);
+    }
+
+    #[test]
     fn overflowing_numeric_literals_are_coerced_finite() {
         // `1E999` overflows f64 to +∞ on parse; the indexer must clamp it so a
         // malformed file can never seed a non-finite coordinate into geometry
-        let sf = parse(
-            "DATA;\n#1=CARTESIAN_POINT('',(1E999,-1.0E400,3.));\nENDSEC;",
-        );
+        let sf = parse("DATA;\n#1=CARTESIAN_POINT('',(1E999,-1.0E400,3.));\nENDSEC;");
         let p = sf.params(1).unwrap();
         let coords = p[1].as_list().unwrap();
         assert_eq!(coords[0].as_f64(), Some(0.0), "1E999 must clamp to 0");

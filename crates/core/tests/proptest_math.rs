@@ -77,8 +77,11 @@ fn analytic_surface() -> impl Strategy<Value = Surface> {
         (frame(), 0.1..1e3f64).prop_map(|(f, r)| Surface::Cylinder(f, r)),
         (frame(), 0.1..1e3f64, -1.4..1.4f64).prop_map(|(f, r, a)| Surface::Cone(f, r, a)),
         (frame(), 0.1..1e3f64).prop_map(|(f, r)| Surface::Sphere(f, r)),
-        (frame(), 1.0..1e3f64, 0.05..0.9f64)
-            .prop_map(|(f, maj, frac)| Surface::Torus(f, maj, maj * frac)),
+        (frame(), 1.0..1e3f64, 0.05..0.9f64).prop_map(|(f, maj, frac)| Surface::Torus(
+            f,
+            maj,
+            maj * frac
+        )),
     ]
 }
 

@@ -1,0 +1,16 @@
+{
+  "name": "step2glb-wasm-demo",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "In-browser STEP → GLB demo for step2glb (wasm + OPFS sync handles)",
+  "scripts": {
+    "build:wasm": "wasm-pack build ../crates/wasm --target web --out-dir ../../wasm-demo/pkg --release",
+    "dev": "npm run build:wasm && vite",
+    "build": "npm run build:wasm && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0"
+  }
+}

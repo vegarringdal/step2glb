@@ -338,7 +338,10 @@ pub fn filter_roots(asm: &Assembly, query: &str) -> Vec<u32> {
         .collect();
     hits.sort_unstable();
     let set: HashSet<u32> = hits.iter().copied().collect();
-    hits.retain(|&pd| !set.iter().any(|&a| a != pd && subtree_contains(asm, a, pd, 0)));
+    hits.retain(|&pd| {
+        !set.iter()
+            .any(|&a| a != pd && subtree_contains(asm, a, pd, 0))
+    });
     hits
 }
 
@@ -519,7 +522,10 @@ pub fn subtree_entities(sf: &StepFile, asm: &Assembly, roots: &[u32]) -> Vec<u32
     // 3) PRODUCT_DEFINITION_SHAPE for those PDs / NAUOs
     let mut pdss: HashSet<u32> = HashSet::new();
     for &p in sf.of_type("PRODUCT_DEFINITION_SHAPE") {
-        if let Some(def) = sf.params(p).and_then(|q| q.get(2).and_then(|v| v.as_ref_id())) {
+        if let Some(def) = sf
+            .params(p)
+            .and_then(|q| q.get(2).and_then(|v| v.as_ref_id()))
+        {
             if interesting.contains(&def) || nauos.contains(&def) {
                 pdss.insert(p);
                 seeds.insert(p);
@@ -530,7 +536,10 @@ pub fn subtree_entities(sf: &StepFile, asm: &Assembly, roots: &[u32]) -> Vec<u32
     // 4) SHAPE_DEFINITION_REPRESENTATION linking those PDS to their SR
     for &sdr in sf.of_type("SHAPE_DEFINITION_REPRESENTATION") {
         if let Some(p) = sf.params(sdr) {
-            if p.first().and_then(|v| v.as_ref_id()).is_some_and(|d| pdss.contains(&d)) {
+            if p.first()
+                .and_then(|v| v.as_ref_id())
+                .is_some_and(|d| pdss.contains(&d))
+            {
                 seeds.insert(sdr);
                 if let Some(sr) = p.get(1).and_then(|v| v.as_ref_id()) {
                     reps.insert(sr);
@@ -542,7 +551,10 @@ pub fn subtree_entities(sf: &StepFile, asm: &Assembly, roots: &[u32]) -> Vec<u32
     // 5) CONTEXT_DEPENDENT_SHAPE_REPRESENTATION (per-instance transforms) + rel
     for &cdsr in sf.of_type("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION") {
         if let Some(p) = sf.params(cdsr) {
-            if p.get(1).and_then(|v| v.as_ref_id()).is_some_and(|x| pdss.contains(&x)) {
+            if p.get(1)
+                .and_then(|v| v.as_ref_id())
+                .is_some_and(|x| pdss.contains(&x))
+            {
                 seeds.insert(cdsr);
                 if let Some(rel) = p.first().and_then(|v| v.as_ref_id()) {
                     seeds.insert(rel);
@@ -579,7 +591,15 @@ pub fn subtree_entities(sf: &StepFile, asm: &Assembly, roots: &[u32]) -> Vec<u32
     };
     let rel_refs: Vec<(u32, Vec<u32>)> = rels
         .iter()
-        .map(|&r| (r, sf.entity_refs(r).into_iter().filter(|&x| is_rep(x)).collect()))
+        .map(|&r| {
+            (
+                r,
+                sf.entity_refs(r)
+                    .into_iter()
+                    .filter(|&x| is_rep(x))
+                    .collect(),
+            )
+        })
         .collect();
     // one hop, scoped to the element's own reps: pull the sibling rep (the
     // brep, typically) that a relationship pairs with one of our reps, plus the

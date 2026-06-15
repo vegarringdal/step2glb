@@ -5,7 +5,87 @@
 //! across the file with material 0 as the uncolored default.
 
 use crate::geom::M4;
+use crate::io::{MemSink, MemTemp, OutputHandle, TempHandle};
 use crate::mesh::{as_bytes, as_bytes_u32, quantize_color, MeshSet, TriMesh};
+
+/// Appends the GLB binary chunk to a [`TempHandle`] (spillable to disk under a
+/// memory threshold), tracking the running offset. Every payload here is f32 /
+/// u32, so the chunk is naturally 4-byte aligned.
+struct Bin<'a> {
+    tmp: &'a mut dyn TempHandle,
+    off: usize,
+}
+
+impl<'a> Bin<'a> {
+    fn new(tmp: &'a mut dyn TempHandle) -> Self {
+        Bin { tmp, off: 0 }
+    }
+    /// Append bytes, returning their start offset within the buffer.
+    fn append(&mut self, bytes: &[u8]) -> usize {
+        let at = self.off;
+        self.tmp.write_at(at as u64, bytes).expect("temp write");
+        self.off += bytes.len();
+        at
+    }
+    fn align(&mut self, to: usize) {
+        while !self.off.is_multiple_of(to) {
+            self.tmp
+                .write_at(self.off as u64, &[0])
+                .expect("temp write");
+            self.off += 1;
+        }
+    }
+    fn len(&self) -> usize {
+        self.off
+    }
+}
+
+/// Stream the GLB container to `out`: the 12-byte header, the padded JSON chunk,
+/// then the BIN chunk copied back from `tmp`. Nothing larger than the JSON
+/// metadata is held in RAM here — the geometry lives in `tmp`.
+fn finish_glb(
+    out: &mut dyn OutputHandle,
+    json: String,
+    tmp: &dyn TempHandle,
+) -> std::io::Result<()> {
+    let mut json_bytes = json.into_bytes();
+    while !json_bytes.len().is_multiple_of(4) {
+        json_bytes.push(b' ');
+    }
+    let bin_len = tmp.len() as usize;
+    let bin_pad = (4 - bin_len % 4) % 4;
+    let total = 12 + 8 + json_bytes.len() + 8 + bin_len + bin_pad;
+
+    let mut header = Vec::with_capacity(20);
+    header.extend_from_slice(b"glTF");
+    header.extend_from_slice(&2u32.to_le_bytes());
+    header.extend_from_slice(&(total as u32).to_le_bytes());
+    header.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+    header.extend_from_slice(b"JSON");
+    out.write(&header)?;
+    out.write(&json_bytes)?;
+
+    let mut bin_header = Vec::with_capacity(8);
+    bin_header.extend_from_slice(&((bin_len + bin_pad) as u32).to_le_bytes());
+    bin_header.extend_from_slice(b"BIN\0");
+    out.write(&bin_header)?;
+
+    // copy the binary chunk out of the spill in 1 MiB strides
+    let mut buf = vec![0u8; 1 << 20];
+    let mut off = 0u64;
+    while (off as usize) < bin_len {
+        let n = tmp.read_at(off, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        out.write(&buf[..n])?;
+        off += n as u64;
+    }
+    if bin_pad > 0 {
+        out.write(&[0u8; 4][..bin_pad])?;
+    }
+    Ok(())
+}
 
 pub struct GlbNode {
     pub name: String,
@@ -45,8 +125,25 @@ impl GlbBuilder {
         self.meshes.iter().map(|(_, m)| m.triangle_count()).sum()
     }
 
+    /// Convenience all-in-RAM write (used by tests and callers that want bytes).
     pub fn write(&self, generator: &str) -> Vec<u8> {
-        let mut bin: Vec<u8> = Vec::new();
+        let mut out = MemSink::default();
+        let mut tmp = MemTemp::default();
+        self.write_stream(generator, &mut out, &mut tmp)
+            .expect("in-memory GLB write is infallible");
+        out.0
+    }
+
+    /// Stream the GLB to `out`, spilling the binary chunk through `tmp` (which
+    /// the caller may back with an on-disk temp file to stay under a memory
+    /// ceiling). The JSON metadata is the only large thing kept in RAM here.
+    pub fn write_stream(
+        &self,
+        generator: &str,
+        out: &mut dyn OutputHandle,
+        tmp: &mut dyn TempHandle,
+    ) -> std::io::Result<()> {
+        let mut bin = Bin::new(tmp);
         let mut views = String::new();
         let mut accessors = String::new();
         let mut meshes_json = String::new();
@@ -167,7 +264,8 @@ impl GlbBuilder {
             .collect::<Vec<_>>()
             .join(",");
 
-        align(&mut bin, 4);
+        bin.align(4);
+        let blen = bin.len();
         let json = format!(
             concat!(
                 "{{\"asset\":{{\"version\":\"2.0\",\"generator\":{gen}}},",
@@ -186,31 +284,11 @@ impl GlbBuilder {
             materials = materials_json,
             acc = accessors,
             views = views,
-            blen = bin.len(),
+            blen = blen,
         );
 
-        pack_glb(json, bin)
+        finish_glb(out, json, tmp)
     }
-}
-
-/// Wrap a JSON string and binary payload in the GLB container format.
-fn pack_glb(json: String, bin: Vec<u8>) -> Vec<u8> {
-    let mut json_bytes = json.into_bytes();
-    while json_bytes.len() % 4 != 0 {
-        json_bytes.push(b' ');
-    }
-    let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
-    let mut out = Vec::with_capacity(total);
-    out.extend_from_slice(b"glTF");
-    out.extend_from_slice(&2u32.to_le_bytes());
-    out.extend_from_slice(&(total as u32).to_le_bytes());
-    out.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
-    out.extend_from_slice(b"JSON");
-    out.extend_from_slice(&json_bytes);
-    out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
-    out.extend_from_slice(b"BIN\0");
-    out.extend_from_slice(&bin);
-    out
 }
 
 // -------------------------------------------------------------- merged output
@@ -307,8 +385,23 @@ impl MergedBuilder {
         self.buckets.iter().map(|b| b.mesh.triangle_count()).sum()
     }
 
+    /// Convenience all-in-RAM write (used by tests and callers that want bytes).
     pub fn write(&self, generator: &str) -> Vec<u8> {
-        let mut bin: Vec<u8> = Vec::new();
+        let mut out = MemSink::default();
+        let mut tmp = MemTemp::default();
+        self.write_stream(generator, &mut out, &mut tmp)
+            .expect("in-memory GLB write is infallible");
+        out.0
+    }
+
+    /// Stream the merged GLB to `out`, spilling the binary chunk through `tmp`.
+    pub fn write_stream(
+        &self,
+        generator: &str,
+        out: &mut dyn OutputHandle,
+        tmp: &mut dyn TempHandle,
+    ) -> std::io::Result<()> {
+        let mut bin = Bin::new(tmp);
         let mut views = String::new();
         let mut accessors = String::new();
         let mut meshes_json = String::new();
@@ -389,7 +482,8 @@ impl MergedBuilder {
             .collect::<Vec<_>>()
             .join(",");
 
-        align(&mut bin, 4);
+        bin.align(4);
+        let blen = bin.len();
         let json = format!(
             concat!(
                 "{{\"asset\":{{\"version\":\"2.0\",\"generator\":{gen},",
@@ -410,15 +504,15 @@ impl MergedBuilder {
             materials = materials_json,
             acc = accessors,
             views = views,
-            blen = bin.len(),
+            blen = blen,
         );
-        pack_glb(json, bin)
+        finish_glb(out, json, tmp)
     }
 }
 
 fn write_primitive(
     m: &TriMesh,
-    bin: &mut Vec<u8>,
+    bin: &mut Bin,
     views: &mut String,
     accessors: &mut String,
     n_views: &mut usize,
@@ -426,9 +520,8 @@ fn write_primitive(
 ) -> (usize, Option<usize>, usize) {
     let vcount = m.vertex_count();
 
-    align(bin, 4);
-    let pos_off = bin.len();
-    bin.extend_from_slice(as_bytes(&m.positions));
+    bin.align(4);
+    let pos_off = bin.append(as_bytes(&m.positions));
     let (mn, mx) = m.bounds();
     push_view(views, n_views, pos_off, m.positions.len() * 4, Some(34962));
     let pos_acc = push_accessor(
@@ -445,18 +538,22 @@ fn write_primitive(
     let nrm_acc = if m.normals.is_empty() {
         None
     } else {
-        align(bin, 4);
-        let nrm_off = bin.len();
-        bin.extend_from_slice(as_bytes(&m.normals));
+        bin.align(4);
+        let nrm_off = bin.append(as_bytes(&m.normals));
         push_view(views, n_views, nrm_off, m.normals.len() * 4, Some(34962));
         Some(push_accessor(
-            accessors, n_acc, *n_views - 1, 5126, vcount, "VEC3", None,
+            accessors,
+            n_acc,
+            *n_views - 1,
+            5126,
+            vcount,
+            "VEC3",
+            None,
         ))
     };
 
-    align(bin, 4);
-    let idx_off = bin.len();
-    bin.extend_from_slice(as_bytes_u32(&m.indices));
+    bin.align(4);
+    let idx_off = bin.append(as_bytes_u32(&m.indices));
     push_view(views, n_views, idx_off, m.indices.len() * 4, Some(34963));
     let idx_acc = push_accessor(
         accessors,
@@ -475,12 +572,6 @@ fn attributes_json(pos_acc: usize, nrm_acc: Option<usize>) -> String {
     match nrm_acc {
         Some(n) => format!("\"POSITION\":{},\"NORMAL\":{}", pos_acc, n),
         None => format!("\"POSITION\":{}", pos_acc),
-    }
-}
-
-fn align(bin: &mut Vec<u8>, to: usize) {
-    while bin.len() % to != 0 {
-        bin.push(0);
     }
 }
 
@@ -588,7 +679,7 @@ mod tests {
         m
     }
 
-    fn build() -> Vec<u8> {
+    fn scene() -> GlbBuilder {
         let mut set = MeshSet::default();
         set.bucket(None).append(&tri_mesh());
         set.bucket(Some([1.0, 0.0, 0.0, 1.0])).append(&tri_mesh());
@@ -600,7 +691,28 @@ mod tests {
         let root = b.add_node("root".into(), None, None);
         b.nodes[root].children = vec![child];
         b.root_nodes = vec![root];
-        b.write("test")
+        b
+    }
+
+    fn build() -> Vec<u8> {
+        scene().write("test")
+    }
+
+    #[test]
+    fn streamed_output_through_temp_spill_is_byte_identical() {
+        // the streaming writer routes the binary chunk through a TempHandle (a
+        // file under --memory-threshold); a MemTemp spill must reproduce the
+        // exact same GLB as the all-in-RAM write().
+        let b = scene();
+        let in_ram = b.write("test");
+        let mut out = MemSink::default();
+        let mut tmp = MemTemp::default();
+        b.write_stream("test", &mut out, &mut tmp).unwrap();
+        assert_eq!(out.0, in_ram, "streamed bytes must equal the in-RAM write");
+        assert!(
+            tmp.len() > 0,
+            "binary chunk was routed through the temp spill"
+        );
     }
 
     #[test]
@@ -703,7 +815,10 @@ mod tests {
         }
 
         // id_hierarchy: [name, parent]; the extra-color slices are child nodes
-        assert_eq!(extras["id_hierarchy"]["1"], serde_json::json!(["root", "*"]));
+        assert_eq!(
+            extras["id_hierarchy"]["1"],
+            serde_json::json!(["root", "*"])
+        );
         assert_eq!(extras["id_hierarchy"]["2"], serde_json::json!(["a", "1"]));
         assert_eq!(extras["id_hierarchy"]["4"], serde_json::json!(["a", "2"]));
         assert_eq!(extras["id_hierarchy"]["5"], serde_json::json!(["b", "3"]));

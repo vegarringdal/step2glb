@@ -79,7 +79,10 @@ fn find_color(sf: &StepFile, roots: &[u32]) -> Option<[f32; 4]> {
                 }
             }
             Some("SURFACE_STYLE_TRANSPARENT") if transparency.is_none() => {
-                if let Some(t) = sf.params(id).and_then(|p| p.iter().find_map(|v| v.as_f64())) {
+                if let Some(t) = sf
+                    .params(id)
+                    .and_then(|p| p.iter().find_map(|v| v.as_f64()))
+                {
                     transparency = Some(t as f32);
                 }
             }
@@ -194,7 +197,9 @@ ENDSEC;";
     fn surface_style_transparent_sets_alpha() {
         let sf = parse(TRANSPARENT);
         let c = *build_color_map(&sf).get(&1).expect("solid #1 colored");
-        assert!((c[0] - 0.2).abs() < 1e-6 && (c[1] - 0.4).abs() < 1e-6 && (c[2] - 0.6).abs() < 1e-6);
+        assert!(
+            (c[0] - 0.2).abs() < 1e-6 && (c[1] - 0.4).abs() < 1e-6 && (c[2] - 0.6).abs() < 1e-6
+        );
         // alpha = 1 - 0.25
         assert!((c[3] - 0.75).abs() < 1e-6, "alpha {} (expected 0.75)", c[3]);
     }

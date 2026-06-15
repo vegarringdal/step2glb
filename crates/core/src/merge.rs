@@ -199,7 +199,8 @@ impl Walk<'_, '_> {
                 // then scale the geometry into the global unit — so a
                 // metre-context part in an otherwise-mm file is neither shrunk
                 // away nor under-tessellated.
-                let factor = crate::model::rep_unit_factor(self.cx.sf, sr, self.opts.file_unit_scale);
+                let factor =
+                    crate::model::rep_unit_factor(self.cx.sf, sr, self.opts.file_unit_scale);
                 let rep_tp = crate::model::TessParams {
                     deflection: self.cx.tp.deflection / factor,
                     max_angle: self.cx.tp.max_angle,

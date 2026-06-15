@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>step2glb · wasm demo</title>
+    <!-- <model-viewer> renders the resulting GLB without any extra build step -->
+    <script
+      type="module"
+      src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.5.0/model-viewer.min.js"
+    ></script>
+    <style>
+      body {
+        font: 14px/1.5 system-ui, sans-serif;
+        margin: 0;
+        background: #1a1a1d;
+        color: #ddd;
+      }
+      header {
+        padding: 12px 16px;
+        background: #232327;
+        display: flex;
+        gap: 12px;
+        align-items: center;
+      }
+      button {
+        font: inherit;
+        padding: 6px 14px;
+        border: 0;
+        border-radius: 6px;
+        background: #4b8;
+        color: #042;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      #status {
+        opacity: 0.8;
+      }
+      main {
+        display: flex;
+        height: calc(100vh - 56px);
+      }
+      model-viewer {
+        flex: 1;
+        background: #1a1a1d;
+      }
+      #info {
+        width: 320px;
+        overflow: auto;
+        padding: 12px 16px;
+        background: #202024;
+        border-left: 1px solid #333;
+        font-size: 13px;
+      }
+      #info h3 {
+        margin: 0 0 8px;
+        word-break: break-all;
+      }
+      #info details {
+        margin: 8px 0;
+      }
+      #info summary {
+        cursor: pointer;
+        color: #9cf;
+      }
+      input[type='file'] {
+        color: #aaa;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <strong>step2glb</strong>
+      <button id="sample">Convert sample (box − cylinder)</button>
+      <label
+        >or pick a .step/.stp:
+        <input id="file" type="file" accept=".step,.stp,.STEP,.STP" />
+      </label>
+      <button id="download" disabled>Download GLB</button>
+      <span id="status">loading wasm…</span>
+    </header>
+    <main>
+      <model-viewer
+        style="height:100%"
+        id="viewer"
+        camera-controls
+        auto-rotate
+        shadow-intensity="1"
+        exposure="1"
+      ></model-viewer>
+      <aside id="info"></aside>
+    </main>
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>

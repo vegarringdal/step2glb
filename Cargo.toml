@@ -1,21 +1,18 @@
-[package]
-name = "step2glb"
+[workspace]
+members = ["crates/core", "crates/cli", "crates/capi", "crates/wasm"]
+# plain `cargo build` / `cargo test` operate on the native crates; the wasm
+# shell is built explicitly for its target:
+#   cargo build -p step2glb-wasm --target wasm32-unknown-unknown
+default-members = ["crates/core", "crates/cli", "crates/capi"]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
-description = "Low-memory STEP (ISO 10303-21) parser: hierarchy dump + tessellation to GLB"
-authors = ["Vegar Ringdal <vegar.ringdal@postboxen.no>"]
 license = "MIT"
+authors = ["Vegar Ringdal <vegar.ringdal@postboxen.no>"]
 
-[dependencies]
-clap = { version = "4", features = ["derive"] }
-md5 = "0.7"
-meshopt = "0.6"
-tess2-rust = "1.1.0"
-
+# Profiles only take effect at the workspace root.
 [profile.release]
 lto = true
 codegen-units = 1
-
-[dev-dependencies]
-proptest = "1.11.0"
-serde_json = "1"

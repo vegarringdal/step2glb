@@ -10,10 +10,12 @@ Tessellate STEP (ISO 10303-21 / `.step` / `.stp`) files into binary glTF
 (`.glb`) and inspect the assembly hierarchy, with low memory usage.
 
 No geometry kernel dependency (no OpenCASCADE): the parser, math, surfaces,
-tessellation and GLB writer are all in this crate, on top of four small
-dependencies: `clap` (CLI), `md5` (mesh dedup keys), `meshopt`
-(meshoptimizer pass) and `tess2-rust` (pure-Rust libtess2 port for polygon
-triangulation with holes).
+tessellation, CSG and GLB writer are all hand-written. The engine lives in one
+library crate (`step2glb-core`) on top of three small dependencies — `md5`
+(mesh dedup keys), `tess2-rust` (pure-Rust libtess2 port for polygon
+triangulation with holes), and the optional `meshopt` (meshoptimizer pass) —
+with thin front-ends layered on top (a CLI, a C ABI, and a WebAssembly build).
+See [Crates](#crates) for the layout.
 
 ## What it does
 
@@ -76,16 +78,85 @@ triangulation with holes).
 Output of all test models validates clean against the Khronos glTF validator
 (0 errors / 0 warnings / 0 infos).
 
-## Build
+## Crates
+
+The repository is a Cargo **workspace**. The engine is one library; everything
+else is a thin shell over it:
+
+| Crate / dir | Kind | What it is |
+| --- | --- | --- |
+| [`crates/core`](crates/core) — `step2glb-core` | library (import name `step2glb`) | the whole engine: Part-21 reader, geometry/NURBS, tessellation, CSG, the GLB writer, the three sync **I/O handle** traits and the one-call [`convert()`](crates/core/src/convert.rs). No CLI dependency. Cargo features: `optimize` (meshoptimizer, default) and `mmap` (memory-map input, default) — both off under `--no-default-features`. |
+| [`crates/cli`](crates/cli) — `step2glb-cli` | binary `step2glb` | the command-line converter: `clap`, memory-mapped input, on-disk spill (`--memory-threshold`). |
+| [`crates/capi`](crates/capi) — `step2glb-capi` | `cdylib` + `staticlib` | a C ABI (`step2glb_convert` / `step2glb_free`) for embedding in C/C++/Python/… |
+| [`crates/wasm`](crates/wasm) — `step2glb-wasm` | `cdylib` | the WebAssembly build (`convert_step_to_glb`), core compiled `--no-default-features`. |
+| [`wasm-demo/`](wasm-demo) | Vite app | an in-browser STEP → GLB demo: a Web Worker + OPFS **synchronous** access handles around the wasm core, rendered with `<model-viewer>`. |
+
+Plain `cargo build` / `cargo test` operate on the native crates (core, cli,
+capi — the workspace `default-members`); the wasm crate is built for its own
+target (below). The three sync handles (`InputHandle` / `OutputHandle` /
+`TempHandle` in [`core::io`](crates/core/src/io.rs)) are how the same core talks
+to a `Vec`, a memory map, a temp file, or the browser's OPFS without ever
+becoming `async`.
+
+## Build & use
+
+### CLI — `step2glb-cli`
 
 ```sh
-cargo build --release
-# binary at target/release/step2glb
+cargo build --release            # binary at target/release/step2glb
+./target/release/step2glb model.step
 ```
 
-`meshopt` compiles the bundled meshoptimizer C++ sources, so a C++ toolchain
-is required, and its current bindings need a reasonably recent stable Rust
-(1.82+). Everything else is pure Rust.
+`meshopt` compiles the bundled meshoptimizer C++ sources, so a C++ toolchain is
+required for the default build (drop it with `--no-default-features` on
+`step2glb-core`); its bindings need stable Rust 1.82+. Everything else is pure
+Rust. See [Usage](#usage) for the flags.
+
+### Library — `step2glb-core`
+
+```rust
+use step2glb::convert::{convert, ConvertOptions};
+use step2glb::io::{MemSink, MemTemp};
+
+let step = std::fs::read("model.step")?;
+let (mut out, mut tmp) = (MemSink::default(), MemTemp::default());
+let report = convert(&step, &mut out, &mut tmp, &ConvertOptions::default())?;
+std::fs::write("model.glb", &out.0)?;          // the GLB bytes
+println!("{}", report.to_json());               // faces ok/skipped, issues, defaults used
+```
+
+`convert` reads through an `InputHandle`, streams the binary chunk through a
+`TempHandle` and writes the container to an `OutputHandle`. For files larger
+than RAM, parse with `StepFile::open(path)` (memory-map) and back `tmp` with an
+on-disk `TempHandle` so the geometry never lands on the heap. The lower-level
+pipeline (`step`, `hierarchy`, `tessellate`, `merge`, `glb`) is public too if you
+need hierarchical output or per-entity control — that is what the CLI drives.
+
+### C ABI — `step2glb-capi`
+
+```sh
+cargo build -p step2glb-capi --release   # target/release/libstep2glb_capi.{so,a,dylib}
+```
+
+```c
+uint8_t *glb = NULL; size_t glb_len = 0;
+int rc = step2glb_convert(step_ptr, step_len, &glb, &glb_len);   // 0 = ok
+if (rc == 0) { /* use glb[0..glb_len] */ step2glb_free(glb, glb_len); }
+```
+
+### WebAssembly — `step2glb-wasm` + `wasm-demo`
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo build -p step2glb-wasm --target wasm32-unknown-unknown   # compile check
+
+cd wasm-demo && npm install && npm run dev   # wasm-pack build + Vite dev server
+```
+
+The wasm exports `convert_step_to_glb(bytes) -> { glb, info }` (`info` is the
+JSON diagnostics report). The browser build drops meshopt/mmap. The demo writes
+the upload to OPFS on the main thread, hands the worker a path, and the worker
+does all sync-handle I/O — see [`wasm-demo/README.md`](wasm-demo/README.md).
 
 ## Usage
 
@@ -162,6 +233,10 @@ step2glb model.step --no-optimize
 # tessellation threads (default: auto = CPU cores, capped at 4);
 # output is byte-identical regardless of thread count
 step2glb model.step -t 8
+
+# spill the GLB binary chunk to a temp file instead of holding it in RAM
+# (accepts 300mb / 1gb / raw bytes; 0 = all in memory). Output is identical.
+step2glb huge.step --memory-threshold 500mb
 
 # diagnose skipped faces: dump a minimal, shareable STEP reproduction of the
 # first failing face of each surface type to model.debug.txt
@@ -325,21 +400,28 @@ entity file indexes in ~80 ms; a 15 MB assembly converts end-to-end in
 
 ## Module map
 
+`step2glb-core` (`crates/core/src/`):
+
 ```
-src/step.rs        Part-21 indexer + lazy parameter parser (incl. complex instances)
-src/geom.rs        V3 / M4 / frames, analytic surfaces, B-spline curve eval
-src/model.rs       typed entity accessors, edge-curve discretization, per-context units
-src/tessellate.rs  B-rep traversal, UV tessellation, seam handling, refinement
-src/csg.rs         CSG primitives + BSP-tree mesh boolean (CSG_SOLID evaluation)
-src/hierarchy.rs   product graph, NAUO edges, instance transforms
-src/styles.rs      STYLED_ITEM color chains, named pre-defined colours
-src/merge.rs       --merged: world-space bake, per-color merge, draw ranges
-src/mesh.rs        TriMesh / MeshSet (per-color buckets), md5 hashing, meshopt
-src/glb.rs         dependency-free binary glTF writer (hierarchical + merged)
-src/main.rs        CLI
+step.rs        Part-21 indexer + lazy parameter parser (incl. complex instances)
+                 + the Source backing (owned buffer / memory map)
+io.rs          the three sync I/O handle traits + in-memory impls
+geom.rs        V3 / M4 / frames, analytic surfaces, B-spline curve eval
+model.rs       typed entity accessors, edge-curve discretization, per-context units
+tessellate.rs  B-rep traversal, UV tessellation, seam handling, refinement
+csg.rs         CSG primitives + BSP-tree mesh boolean (CSG_SOLID evaluation)
+hierarchy.rs   product graph, NAUO edges, instance transforms
+styles.rs      STYLED_ITEM color chains, named pre-defined colours
+merge.rs       --merged: world-space bake, per-color merge, draw ranges
+mesh.rs        TriMesh / MeshSet (per-color buckets), md5 hashing, meshopt
+glb.rs         dependency-free binary glTF writer (streams via the I/O handles)
+convert.rs     one-call convert() + ConvertReport (the embeddable API)
 ```
 
-The crate is a lib + bin, so the pipeline can be embedded:
+The other crates are thin shells: `crates/cli/src/main.rs` (CLI driver),
+`crates/capi/src/lib.rs` (C ABI), `crates/wasm/src/lib.rs` (wasm-bindgen).
+
+Because the engine is a library, the pipeline embeds directly:
 
 ```rust
 let sf = step2glb::step::StepFile::parse(std::fs::read("a.step")?)?;
@@ -442,7 +524,7 @@ cargo test
   - `csg_block_minus_cylinder.step` — a `CSG_SOLID` drilling a cylinder out of a
     block via `BOOLEAN_RESULT(.DIFFERENCE.)`: the BSP mesh boolean must remove the
     hole, checked by enclosed volume (block 1000 − cylinder ≈ 717) with every
-    vertex inside the block bounds. Plus `src/csg.rs` unit tests asserting exact
+    vertex inside the block bounds. Plus `crates/core/src/csg.rs` unit tests asserting exact
     primitive volumes and set-volume identities for union/intersection/difference.
   - `colored.step` — a `STYLED_ITEM` chain: color map -> mesh bucket -> GLB
     material assertions.
@@ -585,7 +667,7 @@ cargo test
         no magic constant). Robust for primitive trees; the known soft spot is
         exactly-coplanar coincident faces between operands. `right_angular_wedge`,
         `half_space_solid` and B-rep solid operands are not yet meshed (reported,
-        not silent). See `src/csg.rs`.
+        not silent). See `crates/core/src/csg.rs`.
   - [ ] Lower priority (rare in exchange, surface as skipped-face/approximated
         warnings, not silent): `OFFSET_SURFACE`, `CURVE_BOUNDED_SURFACE`,
         `SURFACE_CURVE_SWEPT_SURFACE` / `FIXED_REFERENCE_SWEPT_SURFACE`,

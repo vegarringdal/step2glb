@@ -186,7 +186,11 @@ fn bspline_patch_with_degenerate_bound_tessellates_full_domain() {
     assert_eq!(stats.faces_ok, 1, "patch must tessellate, not be skipped");
     assert_eq!(stats.faces_failed, 0);
     // flat 10x10 patch -> area 100, independent of tessellation density
-    assert!((total_area(&mesh) - 100.0).abs() < 1e-4, "area {}", total_area(&mesh));
+    assert!(
+        (total_area(&mesh) - 100.0).abs() < 1e-4,
+        "area {}",
+        total_area(&mesh)
+    );
     // planar patch in z=0: every point on the plane
     for p in mesh.positions.chunks(3) {
         assert!(p[2].abs() < 1e-6, "off-plane point {:?}", p);
@@ -205,14 +209,20 @@ fn closed_bspline_cone_with_apex_pole_tessellates() {
     let sf = load("bspline_cone_pole.step");
     let (set, stats) = tessellate_all(&sf, &["ADVANCED_FACE"]);
     let mesh = set.merged();
-    assert_eq!(stats.faces_ok, 1, "capped B-spline must tessellate, not skip");
+    assert_eq!(
+        stats.faces_ok, 1,
+        "capped B-spline must tessellate, not skip"
+    );
     assert_eq!(stats.faces_failed, 0);
     assert_eq!(stats.degenerate_faces, 0);
     assert!(!mesh.is_empty(), "must emit triangles");
     // the apex row collapses, so a band of triangles there is zero-area, but the
     // dome wall has real area — sanity-check it is positive and finite
     let area = total_area(&mesh);
-    assert!(area > 1.0 && area.is_finite(), "implausible dome area {area}");
+    assert!(
+        area > 1.0 && area.is_finite(),
+        "implausible dome area {area}"
+    );
     // By the convex-hull property a B-spline surface lies within the bounding
     // box of its control net. At ~3.5M-unit coordinates this is the robust
     // on-surface check (Newton round-trip is noisy at that magnitude); it also
@@ -235,9 +245,12 @@ fn closed_bspline_cone_with_apex_pole_tessellates() {
     for c in mesh.positions.chunks(3) {
         let p = v3(c[0] as f64, c[1] as f64, c[2] as f64);
         assert!(
-            p.x >= lo.x - eps && p.x <= hi.x + eps
-                && p.y >= lo.y - eps && p.y <= hi.y + eps
-                && p.z >= lo.z - eps && p.z <= hi.z + eps,
+            p.x >= lo.x - eps
+                && p.x <= hi.x + eps
+                && p.y >= lo.y - eps
+                && p.y <= hi.y + eps
+                && p.z >= lo.z - eps
+                && p.z <= hi.z + eps,
             "vertex {p:?} outside control-net hull (fold garbage?)"
         );
     }
@@ -264,11 +277,17 @@ fn csg_block_minus_cylinder_drills_a_hole() {
         "volume {vol:.2} vs ideal {ideal:.2} (block-with-hole)"
     );
     // sanity: clearly less than the solid block (the hole was actually removed)
-    assert!(vol < 950.0, "hole not removed (volume {vol:.2} ~ solid block)");
+    assert!(
+        vol < 950.0,
+        "hole not removed (volume {vol:.2} ~ solid block)"
+    );
     // every vertex lies within the block bounds [0,10]^3 (no stray geometry)
     for c in mesh.positions.chunks(3) {
         for &x in c {
-            assert!((-1e-4..=10.0 + 1e-4).contains(&x), "vertex out of block: {c:?}");
+            assert!(
+                (-1e-4..=10.0 + 1e-4).contains(&x),
+                "vertex out of block: {c:?}"
+            );
         }
     }
 }
@@ -305,8 +324,15 @@ ENDSEC;";
     // de Casteljau at the centre: z = 0.25 * 5 = 1.25, proving it is evaluated
     // as a real Bézier surface, not flattened
     let c = surf.point(0.5, 0.5);
-    assert!((c.x - 5.).abs() < 1e-9 && (c.y - 5.).abs() < 1e-9, "centre xy {c:?}");
-    assert!((c.z - 1.25).abs() < 1e-9, "centre bulge z {} (want 1.25)", c.z);
+    assert!(
+        (c.x - 5.).abs() < 1e-9 && (c.y - 5.).abs() < 1e-9,
+        "centre xy {c:?}"
+    );
+    assert!(
+        (c.z - 1.25).abs() < 1e-9,
+        "centre bulge z {} (want 1.25)",
+        c.z
+    );
 }
 
 #[test]
@@ -338,7 +364,10 @@ fn degenerate_sliver_face_is_skipped_not_failed() {
     // skipped quietly, NOT reported as a tessellation failure.
     let sf = load("degenerate_sliver_face.step");
     let (set, stats) = tessellate_all(&sf, &["ADVANCED_FACE"]);
-    assert_eq!(stats.degenerate_faces, 1, "sliver must be flagged degenerate");
+    assert_eq!(
+        stats.degenerate_faces, 1,
+        "sliver must be flagged degenerate"
+    );
     assert_eq!(stats.faces_failed, 0, "a zero-area face is not a failure");
     assert_eq!(stats.faces_ok, 0);
     assert!(set.merged().is_empty(), "degenerate face emits no geometry");
@@ -499,7 +528,11 @@ ENDSEC;";
     let sf = StepFile::parse(src.as_bytes().to_vec()).expect("parse");
     let (set, _) = tessellate_all(&sf, &["TRIANGULATED_FACE"]);
     assert_eq!(set.merged().triangle_count(), 2);
-    assert!((total_area(&set.merged()) - 1.0).abs() < 1e-6, "area {}", total_area(&set.merged()));
+    assert!(
+        (total_area(&set.merged()) - 1.0).abs() < 1e-6,
+        "area {}",
+        total_area(&set.merged())
+    );
 }
 
 #[test]
@@ -527,7 +560,11 @@ ENDSEC;";
     let sf = StepFile::parse(src.as_bytes().to_vec()).expect("parse");
     let (set, _) = tessellate_all(&sf, &["COMPLEX_TRIANGULATED_FACE"]);
     assert_eq!(set.merged().triangle_count(), 4);
-    assert!((total_area(&set.merged()) - 2.0).abs() < 1e-6, "area {}", total_area(&set.merged()));
+    assert!(
+        (total_area(&set.merged()) - 2.0).abs() < 1e-6,
+        "area {}",
+        total_area(&set.merged())
+    );
 }
 
 #[test]
@@ -543,7 +580,10 @@ fn geometric_curve_set_becomes_line_geometry() {
 ENDSEC;";
     let sf = StepFile::parse(src.as_bytes().to_vec()).expect("parse");
     let (set, stats) = tessellate_all(&sf, &["GEOMETRIC_CURVE_SET"]);
-    assert!(stats.unsupported_items.is_empty(), "handled, not flagged unsupported");
+    assert!(
+        stats.unsupported_items.is_empty(),
+        "handled, not flagged unsupported"
+    );
     let line_parts: Vec<_> = set.parts.iter().filter(|(_, m)| m.lines).collect();
     assert_eq!(line_parts.len(), 1, "one wireframe bucket");
     let m = &line_parts[0].1;
@@ -599,8 +639,15 @@ ENDSEC;";
     let sf = StepFile::parse(src.as_bytes().to_vec()).expect("parse");
     let (set, stats) = tessellate_all(&sf, &["MANIFOLD_SOLID_BREP"]);
     assert_eq!(stats.faces_ok, 1);
-    assert!(stats.approximated_surfaces.is_empty(), "resolved, not plane-approximated");
-    assert!((total_area(&set.merged()) - 100.0).abs() < 1e-6, "area {}", total_area(&set.merged()));
+    assert!(
+        stats.approximated_surfaces.is_empty(),
+        "resolved, not plane-approximated"
+    );
+    assert!(
+        (total_area(&set.merged()) - 100.0).abs() < 1e-6,
+        "area {}",
+        total_area(&set.merged())
+    );
 }
 
 #[test]
@@ -641,8 +688,15 @@ ENDSEC;";
     let sf = StepFile::parse(src.as_bytes().to_vec()).expect("parse");
     let (set, stats) = tessellate_all(&sf, &["MANIFOLD_SOLID_BREP"]);
     assert_eq!(stats.faces_ok, 1);
-    assert!(stats.unsupported_curves.get("COMPOSITE_CURVE").is_none(), "composite handled");
-    assert!((total_area(&set.merged()) - 25.0).abs() < 1e-6, "area {}", total_area(&set.merged()));
+    assert!(
+        stats.unsupported_curves.get("COMPOSITE_CURVE").is_none(),
+        "composite handled"
+    );
+    assert!(
+        (total_area(&set.merged()) - 25.0).abs() < 1e-6,
+        "area {}",
+        total_area(&set.merged())
+    );
 }
 
 #[test]
@@ -676,13 +730,20 @@ fn parabola_and_hyperbola_edges_match_their_analytic_area() {
 ENDSEC;";
     // a fine deflection so the inscribed-polygon area converges to the analytic
     // value — this validates the parameterization, not just that it tessellates
-    let fine = TessParams { deflection: 0.002, max_angle: 5.0_f64.to_radians() };
+    let fine = TessParams {
+        deflection: 0.002,
+        max_angle: 5.0_f64.to_radians(),
+    };
     let cols = ColorMap::new();
     let sf = StepFile::parse(para.as_bytes().to_vec()).expect("parse");
     let (set, stats) = tessellate_with(&sf, &fine, &cols, &["MANIFOLD_SOLID_BREP"]);
     assert_eq!(stats.faces_ok, 1);
     assert!(stats.unsupported_curves.get("PARABOLA").is_none());
-    assert!((total_area(&set.merged()) - 8.0 / 3.0).abs() < 0.01, "parabola area {}", total_area(&set.merged()));
+    assert!(
+        (total_area(&set.merged()) - 8.0 / 3.0).abs() < 0.01,
+        "parabola area {}",
+        total_area(&set.merged())
+    );
 
     // HYPERBOLA P(u)=C+a*cosh(u)*x+b*sinh(u)*y with a=b=1: arc u in [-1,1]
     // (vertex (1,0)) closed by the chord x=cosh(1) bounds area sinh(1)*cosh(1)-1.
@@ -715,7 +776,11 @@ ENDSEC;";
     let expect = 1.0_f64.sinh() * 1.0_f64.cosh() - 1.0;
     assert_eq!(stats.faces_ok, 1);
     assert!(stats.unsupported_curves.get("HYPERBOLA").is_none());
-    assert!((total_area(&set.merged()) - expect).abs() < 0.01, "hyperbola area {} (expected {expect})", total_area(&set.merged()));
+    assert!(
+        (total_area(&set.merged()) - expect).abs() < 0.01,
+        "hyperbola area {} (expected {expect})",
+        total_area(&set.merged())
+    );
 }
 
 #[test]
@@ -743,7 +808,10 @@ fn poly_loop_face_recovers_from_an_inconsistent_declared_plane() {
 ENDSEC;";
     let sf = StepFile::parse(src.as_bytes().to_vec()).expect("parse");
     let (set, stats) = tessellate_all(&sf, &["MANIFOLD_SOLID_BREP"]);
-    assert_eq!(stats.faces_ok, 1, "the planar polygon is recovered, not skipped");
+    assert_eq!(
+        stats.faces_ok, 1,
+        "the planar polygon is recovered, not skipped"
+    );
     assert_eq!(stats.faces_failed, 0);
     // the unit-square (10x10) area is reproduced from the polygon's own plane
     assert!(
@@ -768,7 +836,9 @@ fn entity_filter_resolves_owner_and_closure() {
     // owning_product points at a real product whose rep reaches the face
     let (pd, rep) = hierarchy::owning_product(&sf, &asm, face).expect("face has an owning part");
     assert!(asm.products.contains_key(&pd), "owner is a known product");
-    assert!(sf.entity_type(rep).is_some_and(|t| t.contains("REPRESENTATION")));
+    assert!(sf
+        .entity_type(rep)
+        .is_some_and(|t| t.contains("REPRESENTATION")));
 
     // the closure contains the face and pulls in its geometry (surface/edges),
     // but stays far smaller than the whole file
@@ -891,10 +961,8 @@ fn filter_subtree_entities_reach_geometry() {
 
     let ids = hierarchy::subtree_entities(&sf, &asm, &roots);
     assert!(ids.contains(&roots[0]), "excerpt includes the matched PD");
-    let ty = |pred: &dyn Fn(&str) -> bool| {
-        ids.iter()
-            .any(|&id| sf.entity_type(id).is_some_and(pred))
-    };
+    let ty =
+        |pred: &dyn Fn(&str) -> bool| ids.iter().any(|&id| sf.entity_type(id).is_some_and(pred));
     assert!(
         ty(&|t| t.contains("SHAPE_REPRESENTATION")),
         "closure must reach the shape representation"
@@ -1217,8 +1285,8 @@ fn full_sphere_with_slit_boundary() {
     );
     // every point on the sphere (center (0, 2.5, 0))
     for c in mesh.positions.chunks(3) {
-        let d = ((c[0] as f64).powi(2) + (c[1] as f64 - 2.5).powi(2) + (c[2] as f64).powi(2))
-            .sqrt();
+        let d =
+            ((c[0] as f64).powi(2) + (c[1] as f64 - 2.5).powi(2) + (c[2] as f64).powi(2)).sqrt();
         assert!((d - r).abs() < 1e-4, "off sphere: {:?}", c);
     }
 }
@@ -1403,11 +1471,7 @@ fn merged_as1_draw_ranges_tile_the_index_buffer() {
             .map(|k| k.iter().map(|i| count_instances(asm, i.child_pd)).sum())
             .unwrap_or(0)
     }
-    let expected: usize = asm
-        .roots
-        .iter()
-        .map(|&r| count_instances(&asm, r))
-        .sum();
+    let expected: usize = asm.roots.iter().map(|&r| count_instances(&asm, r)).sum();
     let idh = extras["id_hierarchy"].as_object().unwrap();
     assert_eq!(idh.len(), expected);
 
@@ -1420,7 +1484,11 @@ fn merged_as1_draw_ranges_tile_the_index_buffer() {
         .collect();
     assert_eq!(roots, ["AS1_PE_ASM"]);
     for id in &all_ids {
-        assert!(idh.contains_key(id), "draw range id {} not in hierarchy", id);
+        assert!(
+            idh.contains_key(id),
+            "draw range id {} not in hierarchy",
+            id
+        );
     }
     for v in idh.values() {
         let p = v[1].as_str().unwrap();

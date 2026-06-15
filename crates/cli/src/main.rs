@@ -1,6 +1,7 @@
 //! step2glb — tessellate STEP (ISO 10303-21) files and export binary glTF,
 //! with assembly-hierarchy dump. Companion in spirit to rvm_parser_glb.
 
+use step2glb::io::{MemTemp, OutputHandle, TempHandle};
 use step2glb::{glb, hierarchy, merge, model, step, styles, tessellate};
 
 use std::collections::HashMap;
@@ -28,6 +29,11 @@ struct Args {
     /// Output .glb path (default: input with .glb extension)
     #[arg(short, long)]
     output: Option<PathBuf>,
+
+    /// Spill the GLB binary chunk to a temp file instead of holding it in RAM
+    /// when set above 0 (e.g. `300mb`, `1gb`). `0` keeps everything in memory.
+    #[arg(long, default_value = "0")]
+    memory_threshold: String,
 
     /// Chordal deflection (max sag) for tessellation, in millimetres. It is
     /// converted into each representation's own modeling unit, so the same
@@ -175,23 +181,18 @@ fn main() {
     let t0 = Instant::now();
 
     let threads = resolve_threads(&args);
+    let mem_threshold = parse_size(&args.memory_threshold);
 
-    let data = match std::fs::read(&args.input) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("error: cannot read {}: {}", args.input.display(), e);
-            std::process::exit(1);
-        }
-    };
-    let file_len = data.len();
-
-    let sf = match StepFile::parse(data) {
+    // memory-map the input (only touched pages are resident, so files larger
+    // than RAM work); falls back to a plain read internally if it can't map.
+    let sf = match StepFile::open(&args.input) {
         Ok(sf) => sf,
         Err(e) => {
-            eprintln!("error: failed to parse STEP file: {}", e);
+            eprintln!("error: failed to read STEP file: {}", e);
             std::process::exit(1);
         }
     };
+    let file_len = sf.byte_len();
     eprintln!(
         "parsed {:.1} MB, {} entities in {:.2?}",
         file_len as f64 / 1e6,
@@ -213,7 +214,11 @@ fn main() {
     } else {
         args.deflection / mm_per_unit
     };
-    let output_scale = if args.no_unit_scale { 1.0 } else { file_unit_scale };
+    let output_scale = if args.no_unit_scale {
+        1.0
+    } else {
+        file_unit_scale
+    };
     print_settings(&args, threads, file_unit_scale);
 
     if args.stats {
@@ -236,7 +241,11 @@ fn main() {
                 let kids = asm.children.get(&pd).map(|k| k.len()).unwrap_or(0);
                 eprintln!(
                     "  #{pd} {name}  ({reps} shape rep(s), {kids} child instance(s){})",
-                    if reps == 0 { ", no geometry of its own" } else { "" }
+                    if reps == 0 {
+                        ", no geometry of its own"
+                    } else {
+                        ""
+                    }
                 );
             }
             asm.roots = roots;
@@ -255,7 +264,11 @@ fn main() {
             if args.with_parent {
                 match owner {
                     Some((pd, _)) => {
-                        let name = asm.products.get(&pd).map(|n| n.name.as_str()).unwrap_or("?");
+                        let name = asm
+                            .products
+                            .get(&pd)
+                            .map(|n| n.name.as_str())
+                            .unwrap_or("?");
                         eprintln!("filter #{eid} ({ety}) -> parent part #{pd} {name}");
                         asm.roots = vec![pd];
                     }
@@ -278,9 +291,7 @@ fn main() {
                 entity_rep = owner.map(|(_, rep)| rep);
             }
         } else {
-            eprintln!(
-                "error: --filter {query:?} matched no product, part name, or entity id",
-            );
+            eprintln!("error: --filter {query:?} matched no product, part name, or entity id",);
             std::process::exit(2);
         }
     }
@@ -419,8 +430,10 @@ fn main() {
             .output
             .clone()
             .unwrap_or_else(|| args.input.with_extension("glb"));
-        let bytes = builder.write(&format!("step2glb {}", env!("CARGO_PKG_VERSION")));
-        write_out(&out_path, &bytes, t0);
+        let gen = format!("step2glb {}", env!("CARGO_PKG_VERSION"));
+        stream_out(&out_path, mem_threshold, t0, |out, tmp| {
+            builder.write_stream(&gen, out, tmp)
+        });
         return;
     }
 
@@ -473,8 +486,10 @@ fn main() {
         let out_path = args
             .output
             .unwrap_or_else(|| args.input.with_extension("glb"));
-        let bytes = merged.write(&format!("step2glb {}", env!("CARGO_PKG_VERSION")));
-        write_out(&out_path, &bytes, t0);
+        let gen = format!("step2glb {}", env!("CARGO_PKG_VERSION"));
+        stream_out(&out_path, mem_threshold, t0, |out, tmp| {
+            merged.write_stream(&gen, out, tmp)
+        });
         return;
     }
 
@@ -485,110 +500,107 @@ fn main() {
     let split = args.split.map(|s| s.level());
 
     let t1 = Instant::now();
-    let mut build_units =
-        |pd: u32, builder: &mut glb::GlbBuilder, stats: &mut TessStats| -> Vec<(String, usize)> {
-            if let Some(cached) = units_of_pd.get(&pd) {
-                return cached.clone();
+    let mut build_units = |pd: u32,
+                           builder: &mut glb::GlbBuilder,
+                           stats: &mut TessStats|
+     -> Vec<(String, usize)> {
+        if let Some(cached) = units_of_pd.get(&pd) {
+            return cached.clone();
+        }
+        let node = asm.products.get(&pd);
+        // weld/prepare a finished MeshSet, then dedup it into a mesh index
+        // so identical geometry (instanced parts) is stored once
+        let add = |mut tm: MeshSet,
+                   name: String,
+                   builder: &mut glb::GlbBuilder,
+                   mesh_of_hash: &mut HashMap<[u8; 16], usize>|
+         -> Option<usize> {
+            prepare_mesh(&mut tm, &args);
+            if tm.is_empty() {
+                return None;
             }
-            let node = asm.products.get(&pd);
-            // weld/prepare a finished MeshSet, then dedup it into a mesh index
-            // so identical geometry (instanced parts) is stored once
-            let add = |mut tm: MeshSet,
-                       name: String,
-                       builder: &mut glb::GlbBuilder,
-                       mesh_of_hash: &mut HashMap<[u8; 16], usize>|
-             -> Option<usize> {
-                prepare_mesh(&mut tm, &args);
-                if tm.is_empty() {
-                    return None;
+            let h = tm.content_hash();
+            Some(match mesh_of_hash.get(&h) {
+                Some(&i) => i,
+                None => {
+                    let i = builder.add_mesh(tm, name);
+                    mesh_of_hash.insert(h, i);
+                    i
                 }
-                let h = tm.content_hash();
-                Some(match mesh_of_hash.get(&h) {
-                    Some(&i) => i,
+            })
+        };
+        let mut units: Vec<(String, usize)> = Vec::new();
+        let mut merged = MeshSet::default();
+        if let Some(node) = node {
+            for &sr in &node.shape_reps {
+                // SHAPE_REPRESENTATION('', (items), context). Honour this
+                // representation's own length unit (Autodesk mixes mm and
+                // metre contexts in one file): tessellate in the rep's unit
+                // (deflection scaled to match, so --deflection stays in mm),
+                // then scale the geometry into the global unit.
+                let factor = model::rep_unit_factor(&sf, sr, file_unit_scale);
+                let rep_tp = TessParams {
+                    deflection: cx.tp.deflection / factor,
+                    max_angle: cx.tp.max_angle,
+                };
+                let rep_cx = tessellate::Ctx {
+                    sf: cx.sf,
+                    tp: &rep_tp,
+                    colors: cx.colors,
+                    threads: cx.threads,
+                };
+                let mut items: Vec<u32> = Vec::new();
+                if let Some(p) = sf.params(sr) {
+                    if let Some(list) = p.get(1).and_then(|v| v.as_list()) {
+                        items.extend(list.iter().filter_map(|v| v.as_ref_id()));
+                    }
+                }
+                let scale = |mut sub: MeshSet| -> MeshSet {
+                    if (factor - 1.0).abs() > 1e-9 {
+                        sub.transform(&M4::scale_uniform(factor));
+                    }
+                    sub
+                };
+                match split {
+                    // default: merge every item of every rep into one mesh
                     None => {
-                        let i = builder.add_mesh(tm, name);
-                        mesh_of_hash.insert(h, i);
-                        i
+                        let mut sub = MeshSet::default();
+                        for r in items {
+                            tessellate::tessellate_item(&rep_cx, r, None, &mut sub, stats);
+                        }
+                        merged.append(&scale(sub));
                     }
-                })
-            };
-            let mut units: Vec<(String, usize)> = Vec::new();
-            let mut merged = MeshSet::default();
-            if let Some(node) = node {
-                for &sr in &node.shape_reps {
-                    // SHAPE_REPRESENTATION('', (items), context). Honour this
-                    // representation's own length unit (Autodesk mixes mm and
-                    // metre contexts in one file): tessellate in the rep's unit
-                    // (deflection scaled to match, so --deflection stays in mm),
-                    // then scale the geometry into the global unit.
-                    let factor = model::rep_unit_factor(&sf, sr, file_unit_scale);
-                    let rep_tp = TessParams {
-                        deflection: cx.tp.deflection / factor,
-                        max_angle: cx.tp.max_angle,
-                    };
-                    let rep_cx = tessellate::Ctx {
-                        sf: cx.sf,
-                        tp: &rep_tp,
-                        colors: cx.colors,
-                        threads: cx.threads,
-                    };
-                    let mut items: Vec<u32> = Vec::new();
-                    if let Some(p) = sf.params(sr) {
-                        if let Some(list) = p.get(1).and_then(|v| v.as_list()) {
-                            items.extend(list.iter().filter_map(|v| v.as_ref_id()));
-                        }
-                    }
-                    let scale = |mut sub: MeshSet| -> MeshSet {
-                        if (factor - 1.0).abs() > 1e-9 {
-                            sub.transform(&M4::scale_uniform(factor));
-                        }
-                        sub
-                    };
-                    match split {
-                        // default: merge every item of every rep into one mesh
-                        None => {
-                            let mut sub = MeshSet::default();
-                            for r in items {
-                                tessellate::tessellate_item(&rep_cx, r, None, &mut sub, stats);
-                            }
-                            merged.append(&scale(sub));
-                        }
-                        // debug: each solid/shell/face becomes its own node,
-                        // named <ENTITY_TYPE>#<id> for cross-referencing
-                        Some(level) => {
-                            for r in items {
-                                for gid in tessellate::split_units(&sf, r, level) {
-                                    let mut sub = MeshSet::default();
-                                    tessellate::tessellate_item(
-                                        &rep_cx, gid, None, &mut sub, stats,
-                                    );
-                                    let label = format!(
-                                        "{}#{}",
-                                        sf.entity_type(gid).unwrap_or("ENTITY"),
-                                        gid
-                                    );
-                                    if let Some(mi) =
-                                        add(scale(sub), label.clone(), builder, &mut mesh_of_hash)
-                                    {
-                                        units.push((label, mi));
-                                    }
+                    // debug: each solid/shell/face becomes its own node,
+                    // named <ENTITY_TYPE>#<id> for cross-referencing
+                    Some(level) => {
+                        for r in items {
+                            for gid in tessellate::split_units(&sf, r, level) {
+                                let mut sub = MeshSet::default();
+                                tessellate::tessellate_item(&rep_cx, gid, None, &mut sub, stats);
+                                let label =
+                                    format!("{}#{}", sf.entity_type(gid).unwrap_or("ENTITY"), gid);
+                                if let Some(mi) =
+                                    add(scale(sub), label.clone(), builder, &mut mesh_of_hash)
+                                {
+                                    units.push((label, mi));
                                 }
                             }
                         }
                     }
                 }
             }
-            if split.is_none() {
-                let name = node
-                    .map(|n| n.name.clone())
-                    .unwrap_or_else(|| format!("PD#{}", pd));
-                if let Some(mi) = add(merged, name.clone(), builder, &mut mesh_of_hash) {
-                    units.push((name, mi));
-                }
+        }
+        if split.is_none() {
+            let name = node
+                .map(|n| n.name.clone())
+                .unwrap_or_else(|| format!("PD#{}", pd));
+            if let Some(mi) = add(merged, name.clone(), builder, &mut mesh_of_hash) {
+                units.push((name, mi));
             }
-            units_of_pd.insert(pd, units.clone());
-            units
-        };
+        }
+        units_of_pd.insert(pd, units.clone());
+        units
+    };
 
     // -------------------------------------------------------- node expansion
     fn expand(
@@ -597,7 +609,11 @@ fn main() {
         name: &str,
         transform: Option<M4>,
         builder: &mut glb::GlbBuilder,
-        build_units: &mut dyn FnMut(u32, &mut glb::GlbBuilder, &mut TessStats) -> Vec<(String, usize)>,
+        build_units: &mut dyn FnMut(
+            u32,
+            &mut glb::GlbBuilder,
+            &mut TessStats,
+        ) -> Vec<(String, usize)>,
         stats: &mut TessStats,
         split_on: bool,
         depth: usize,
@@ -741,21 +757,151 @@ fn main() {
     let out_path = args
         .output
         .unwrap_or_else(|| args.input.with_extension("glb"));
-    let bytes = builder.write(&format!("step2glb {}", env!("CARGO_PKG_VERSION")));
-    write_out(&out_path, &bytes, t0);
+    let gen = format!("step2glb {}", env!("CARGO_PKG_VERSION"));
+    stream_out(&out_path, mem_threshold, t0, |out, tmp| {
+        builder.write_stream(&gen, out, tmp)
+    });
 }
 
-fn write_out(out_path: &std::path::Path, bytes: &[u8], t0: Instant) {
-    if let Err(e) = std::fs::write(out_path, bytes) {
-        eprintln!("error: cannot write {}: {}", out_path.display(), e);
+/// Parse a human byte size (`300mb`, `1gb`, `1048576`, `0`). Unknown / empty
+/// inputs are treated as 0 (all in RAM).
+fn parse_size(s: &str) -> u64 {
+    let s = s.trim().to_lowercase();
+    let (num, mult) = if let Some(n) = s.strip_suffix("gb") {
+        (n, 1u64 << 30)
+    } else if let Some(n) = s.strip_suffix("mb") {
+        (n, 1u64 << 20)
+    } else if let Some(n) = s.strip_suffix("kb") {
+        (n, 1u64 << 10)
+    } else if let Some(n) = s.strip_suffix('b') {
+        (n, 1)
+    } else {
+        (s.as_str(), 1)
+    };
+    num.trim()
+        .parse::<f64>()
+        .map(|v| (v * mult as f64) as u64)
+        .unwrap_or(0)
+}
+
+/// Stream a GLB to `out_path`. With `threshold > 0` the binary chunk spills to
+/// an on-disk temp file (kept off the heap); otherwise it stays in RAM.
+fn stream_out(
+    out_path: &std::path::Path,
+    threshold: u64,
+    t0: Instant,
+    write: impl FnOnce(&mut dyn OutputHandle, &mut dyn TempHandle) -> std::io::Result<()>,
+) {
+    let file = match std::fs::File::create(out_path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("error: cannot write {}: {}", out_path.display(), e);
+            std::process::exit(1);
+        }
+    };
+    let mut sink = FileSink(std::io::BufWriter::new(file));
+    let result = if threshold > 0 {
+        match FileTemp::create() {
+            Ok(mut tmp) => write(&mut sink, &mut tmp),
+            Err(e) => {
+                eprintln!("error: cannot create temp spill file: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        let mut tmp = MemTemp::default();
+        write(&mut sink, &mut tmp)
+    };
+    if let Err(e) = result.and_then(|()| {
+        use std::io::Write;
+        sink.0.flush()
+    }) {
+        eprintln!("error: writing {}: {}", out_path.display(), e);
         std::process::exit(1);
     }
+    let size = std::fs::metadata(out_path).map(|m| m.len()).unwrap_or(0);
     eprintln!(
         "wrote {} ({:.1} MB) in {:.2?} total",
         out_path.display(),
-        bytes.len() as f64 / 1e6,
+        size as f64 / 1e6,
         t0.elapsed()
     );
+}
+
+/// A file-backed [`OutputHandle`] (the final GLB).
+struct FileSink(std::io::BufWriter<std::fs::File>);
+
+impl OutputHandle for FileSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        self.0.write_all(buf)
+    }
+}
+
+/// A file-backed [`TempHandle`] for the geometry spill: a scratch file in the
+/// system temp dir, positioned reads/writes, removed on drop.
+struct FileTemp {
+    file: std::fs::File,
+    path: PathBuf,
+    len: u64,
+}
+
+impl FileTemp {
+    fn create() -> std::io::Result<FileTemp> {
+        let mut path = std::env::temp_dir();
+        path.push(format!("step2glb-spill-{}.bin", std::process::id()));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)?;
+        Ok(FileTemp { file, path, len: 0 })
+    }
+}
+
+impl TempHandle for FileTemp {
+    fn write_at(&mut self, offset: u64, buf: &[u8]) -> std::io::Result<()> {
+        pwrite(&self.file, offset, buf)?;
+        self.len = self.len.max(offset + buf.len() as u64);
+        Ok(())
+    }
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+        pread(&self.file, offset, buf)
+    }
+    fn len(&self) -> u64 {
+        self.len
+    }
+}
+
+impl Drop for FileTemp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(unix)]
+fn pwrite(f: &std::fs::File, offset: u64, buf: &[u8]) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::write_all_at(f, buf, offset)
+}
+#[cfg(unix)]
+fn pread(f: &std::fs::File, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+    std::os::unix::fs::FileExt::read_at(f, buf, offset)
+}
+#[cfg(windows)]
+fn pwrite(f: &std::fs::File, mut offset: u64, mut buf: &[u8]) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !buf.is_empty() {
+        let n = f.seek_write(buf, offset)?;
+        offset += n as u64;
+        buf = &buf[n..];
+    }
+    Ok(())
+}
+#[cfg(windows)]
+fn pread(f: &std::fs::File, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+    use std::os::windows::fs::FileExt;
+    f.seek_read(buf, offset)
 }
 
 /// Effective tessellation worker count: the `--threads` value if positive,
@@ -861,7 +1007,11 @@ fn print_settings(args: &Args, threads: usize, file_unit_scale: f64) {
     }
     // meshoptimizer is applied per item — once per unique mesh in the default
     // (hierarchical) output, once per part instance in merged mode
-    let item = if args.merged { "per part" } else { "per unique mesh" };
+    let item = if args.merged {
+        "per part"
+    } else {
+        "per unique mesh"
+    };
     if args.no_optimize {
         eprintln!("  optimize          off");
     } else {
@@ -914,7 +1064,10 @@ fn print_settings(args: &Args, threads: usize, file_unit_scale: f64) {
         eprintln!("  filter            {q:?} (isolate matching subtree)");
     }
     if let Some(p) = &args.extract_step {
-        eprintln!("  extract-step      {} (write subtree STEP, no GLB)", p.display());
+        eprintln!(
+            "  extract-step      {} (write subtree STEP, no GLB)",
+            p.display()
+        );
     }
     if let Some(s) = args.split {
         let level = match s {
@@ -1037,8 +1190,8 @@ fn write_step_excerpt(sf: &StepFile, ids: &[u32], path: &std::path::Path) {
         \x20  A standalone, re-runnable STEP file. */\n",
     );
     let (h0, h1) = sf.header_range;
-    if h1 > h0 && h1 <= sf.data.len() {
-        out.push_str(&String::from_utf8_lossy(&sf.data[h0..h1]));
+    if h1 > h0 && h1 <= sf.byte_len() {
+        out.push_str(&String::from_utf8_lossy(sf.header()));
         if !out.ends_with('\n') {
             out.push('\n');
         }
@@ -1054,7 +1207,11 @@ fn write_step_excerpt(sf: &StepFile, ids: &[u32], path: &std::path::Path) {
     }
     out.push_str("ENDSEC;\nEND-ISO-10303-21;\n");
     match std::fs::write(path, out) {
-        Ok(()) => eprintln!("--extract-step: wrote {} entities to {}", ids.len(), path.display()),
+        Ok(()) => eprintln!(
+            "--extract-step: wrote {} entities to {}",
+            ids.len(),
+            path.display()
+        ),
         Err(e) => eprintln!("--extract-step: cannot write {}: {}", path.display(), e),
     }
 }
@@ -1081,8 +1238,8 @@ fn maybe_write_debug(args: &Args, sf: &StepFile, stats: &TessStats) {
     );
     // original file HEADER (schema + originating system) — small, valuable
     let (h0, h1) = sf.header_range;
-    if h1 > h0 && h1 <= sf.data.len() {
-        out.push_str(&String::from_utf8_lossy(&sf.data[h0..h1]));
+    if h1 > h0 && h1 <= sf.byte_len() {
+        out.push_str(&String::from_utf8_lossy(sf.header()));
         if !out.ends_with('\n') {
             out.push('\n');
         }
@@ -1155,7 +1312,10 @@ fn maybe_write_debug(args: &Args, sf: &StepFile, stats: &TessStats) {
         .join(",");
     out.push_str("/* synthetic root so the excerpt is self-contained */\n");
     out.push_str(&format!("#{}=CLOSED_SHELL('debug',({}));\n", shell, faces));
-    out.push_str(&format!("#{}=MANIFOLD_SOLID_BREP('debug',#{});\n", solid, shell));
+    out.push_str(&format!(
+        "#{}=MANIFOLD_SOLID_BREP('debug',#{});\n",
+        solid, shell
+    ));
     out.push_str("ENDSEC;\nEND-ISO-10303-21;\n");
 
     let path = args.input.with_extension("debug.txt");
