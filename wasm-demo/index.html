@@ -92,14 +92,15 @@
       <label title="keep per-vertex normals (larger; off = viewer flat-shades)"
         ><input id="normals" type="checkbox" /> normals</label
       >
-      <label title="merged: one node/mesh per color baked to world (vs per-part node tree)"
-        ><input id="merged" type="checkbox" checked /> merged</label
+      <label title="merged: one node/mesh per color baked to world (vs per-part node tree). Always in-RAM — it does not stream, so the memory ceiling does not apply."
+        ><input id="merged" type="checkbox" /> merged</label
       >
       <label title="rvm-style position weld (drops normals; simplify needs meshopt, omitted in wasm)"
         ><input id="cleanup" type="checkbox" /> cleanup</label
       >
       <label
-        title="spill geometry to OPFS above this ceiling — takes effect once the streaming temp-handle bridge lands"
+        id="memLabel"
+        title="memory ceiling: above this, the (hierarchical) converter spills geometry to OPFS so peak RAM stays bounded. Disabled in merged mode, which is always in-RAM."
       >
         memory
         <input id="mem" type="range" min="100" max="2000" step="100" value="512" />

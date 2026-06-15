@@ -30,8 +30,14 @@ struct Args {
     #[arg(short, long)]
     output: Option<PathBuf>,
 
-    /// Spill the GLB binary chunk to a temp file instead of holding it in RAM
-    /// when set above 0 (e.g. `300mb`, `1gb`). `0` keeps everything in memory.
+    /// Cap memory by spilling to an on-disk temp file when set above 0 (e.g.
+    /// `300mb`, `1gb`); `0` keeps everything in RAM. In the default
+    /// (hierarchical) output this spills each mesh's geometry as it is
+    /// tessellated, so peak RAM is one mesh, not the whole model. With --merged
+    /// only the final binary chunk spills — merged accumulates all geometry in
+    /// RAM (one buffer per color) and does not stream. The spill file is
+    /// <input>_tmp_cache, next to the input (not the system temp dir, which is
+    /// often RAM-backed); it is removed on completion.
     #[arg(long, default_value = "0")]
     memory_threshold: String,
 
@@ -58,7 +64,10 @@ struct Args {
 
     /// Merge everything into one node/mesh per color, geometry baked to
     /// world space (Y-up), with per-part draw ranges and the id hierarchy in
-    /// scene extras — the rvm_parser_glb output layout
+    /// scene extras — the rvm_parser_glb output layout. Holds all geometry in
+    /// RAM (one buffer per color) and does not stream, so --memory-threshold
+    /// only bounds the output chunk here, not the resident geometry; for models
+    /// that must stay under a memory ceiling, use the default hierarchical mode
     #[arg(long)]
     merged: bool,
 
@@ -407,7 +416,8 @@ fn main() {
             std::process::exit(2);
         }
         let label = format!("{}#{}", sf.entity_type(eid).unwrap_or("ENTITY"), eid);
-        let mi = builder.add_mesh(tm, label.clone());
+        let mut tmp = geom_temp(mem_threshold, &args.input);
+        let mi = builder.add_mesh(tm, label.clone(), &mut *tmp);
         let node = builder.add_node(label.clone(), None, Some(mi));
         let mut root_m = M4::scale_uniform(output_scale);
         if args.up_axis == UpAxis::Z {
@@ -431,9 +441,7 @@ fn main() {
             .clone()
             .unwrap_or_else(|| args.input.with_extension("glb"));
         let gen = format!("step2glb {}", env!("CARGO_PKG_VERSION"));
-        stream_out(&out_path, mem_threshold, t0, |out, tmp| {
-            builder.write_stream(&gen, out, tmp)
-        });
+        finish_builder(&out_path, &builder, &gen, &mut *tmp, t0);
         return;
     }
 
@@ -485,9 +493,10 @@ fn main() {
         );
         let out_path = args
             .output
+            .clone()
             .unwrap_or_else(|| args.input.with_extension("glb"));
         let gen = format!("step2glb {}", env!("CARGO_PKG_VERSION"));
-        stream_out(&out_path, mem_threshold, t0, |out, tmp| {
+        stream_out(&out_path, &args.input, mem_threshold, t0, |out, tmp| {
             merged.write_stream(&gen, out, tmp)
         });
         return;
@@ -502,6 +511,7 @@ fn main() {
     let t1 = Instant::now();
     let mut build_units = |pd: u32,
                            builder: &mut glb::GlbBuilder,
+                           tmp: &mut dyn TempHandle,
                            stats: &mut TessStats|
      -> Vec<(String, usize)> {
         if let Some(cached) = units_of_pd.get(&pd) {
@@ -509,10 +519,12 @@ fn main() {
         }
         let node = asm.products.get(&pd);
         // weld/prepare a finished MeshSet, then dedup it into a mesh index
-        // so identical geometry (instanced parts) is stored once
+        // so identical geometry (instanced parts) is stored once. The new
+        // mesh's geometry is spilled straight into `tmp` (see add_mesh).
         let add = |mut tm: MeshSet,
                    name: String,
                    builder: &mut glb::GlbBuilder,
+                   tmp: &mut dyn TempHandle,
                    mesh_of_hash: &mut HashMap<[u8; 16], usize>|
          -> Option<usize> {
             prepare_mesh(&mut tm, &args);
@@ -523,7 +535,7 @@ fn main() {
             Some(match mesh_of_hash.get(&h) {
                 Some(&i) => i,
                 None => {
-                    let i = builder.add_mesh(tm, name);
+                    let i = builder.add_mesh(tm, name, tmp);
                     mesh_of_hash.insert(h, i);
                     i
                 }
@@ -580,7 +592,7 @@ fn main() {
                                 let label =
                                     format!("{}#{}", sf.entity_type(gid).unwrap_or("ENTITY"), gid);
                                 if let Some(mi) =
-                                    add(scale(sub), label.clone(), builder, &mut mesh_of_hash)
+                                    add(scale(sub), label.clone(), builder, tmp, &mut mesh_of_hash)
                                 {
                                     units.push((label, mi));
                                 }
@@ -594,7 +606,7 @@ fn main() {
             let name = node
                 .map(|n| n.name.clone())
                 .unwrap_or_else(|| format!("PD#{}", pd));
-            if let Some(mi) = add(merged, name.clone(), builder, &mut mesh_of_hash) {
+            if let Some(mi) = add(merged, name.clone(), builder, tmp, &mut mesh_of_hash) {
                 units.push((name, mi));
             }
         }
@@ -603,6 +615,7 @@ fn main() {
     };
 
     // -------------------------------------------------------- node expansion
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn expand(
         asm: &hierarchy::Assembly,
         pd: u32,
@@ -612,8 +625,10 @@ fn main() {
         build_units: &mut dyn FnMut(
             u32,
             &mut glb::GlbBuilder,
+            &mut dyn TempHandle,
             &mut TessStats,
         ) -> Vec<(String, usize)>,
+        tmp: &mut dyn TempHandle,
         stats: &mut TessStats,
         split_on: bool,
         depth: usize,
@@ -623,7 +638,7 @@ fn main() {
             return None;
         }
         *budget -= 1;
-        let units = build_units(pd, builder, stats);
+        let units = build_units(pd, builder, tmp, stats);
         // without --split the product node carries its one merged mesh; with
         // --split it carries none and each unit hangs off it as a child node
         let node_mesh = if split_on {
@@ -647,6 +662,7 @@ fn main() {
                     Some(k.transform),
                     builder,
                     build_units,
+                    tmp,
                     stats,
                     split_on,
                     depth + 1,
@@ -660,6 +676,10 @@ fn main() {
         Some(node)
     }
 
+    // geometry spills into this handle as each unique mesh is added during the
+    // walk (an on-disk <input>_tmp_cache under --memory-threshold, else RAM),
+    // so peak resident geometry is one mesh, not the whole model.
+    let mut geom_tmp = geom_temp(mem_threshold, &args.input);
     let mut budget: i64 = 2_000_000; // instance explosion guard
     let mut top_nodes: Vec<usize> = Vec::new();
     for &root in &asm.roots {
@@ -675,6 +695,7 @@ fn main() {
             None,
             &mut builder,
             &mut build_units,
+            &mut *geom_tmp,
             &mut stats,
             split.is_some(),
             0,
@@ -708,7 +729,7 @@ fn main() {
         }
         prepare_mesh(&mut tm, &args);
         if !tm.is_empty() {
-            let mi = builder.add_mesh(tm, "geometry".into());
+            let mi = builder.add_mesh(tm, "geometry".into(), &mut *geom_tmp);
             let n = builder.add_node("root".into(), None, Some(mi));
             top_nodes.push(n);
         }
@@ -735,7 +756,7 @@ fn main() {
 
     eprintln!(
         "tessellated {} unique meshes ({} faces ok, {} skipped) in {:.2?}",
-        builder.meshes.len(),
+        builder.mesh_count(),
         stats.faces_ok,
         stats.faces_failed,
         t1.elapsed()
@@ -748,7 +769,7 @@ fn main() {
     eprintln!(
         "{} nodes, {} unique meshes, {} verts, {} tris",
         builder.nodes.len(),
-        builder.meshes.len(),
+        builder.mesh_count(),
         total_verts,
         total_tris
     );
@@ -758,9 +779,7 @@ fn main() {
         .output
         .unwrap_or_else(|| args.input.with_extension("glb"));
     let gen = format!("step2glb {}", env!("CARGO_PKG_VERSION"));
-    stream_out(&out_path, mem_threshold, t0, |out, tmp| {
-        builder.write_stream(&gen, out, tmp)
-    });
+    finish_builder(&out_path, &builder, &gen, &mut *geom_tmp, t0);
 }
 
 /// Parse a human byte size (`300mb`, `1gb`, `1048576`, `0`). Unknown / empty
@@ -785,9 +804,14 @@ fn parse_size(s: &str) -> u64 {
 }
 
 /// Stream a GLB to `out_path`. With `threshold > 0` the binary chunk spills to
-/// an on-disk temp file (kept off the heap); otherwise it stays in RAM.
+/// an on-disk temp file (kept off the heap); otherwise it stays in RAM. The
+/// spill is named after `input` (see [`FileTemp::create`]). Used by the merged
+/// path, where geometry is accumulated in RAM and only the output binary chunk
+/// is spilled; the hierarchical path spills geometry during the walk instead
+/// (see [`geom_temp`] / [`finish_builder`]).
 fn stream_out(
     out_path: &std::path::Path,
+    input: &std::path::Path,
     threshold: u64,
     t0: Instant,
     write: impl FnOnce(&mut dyn OutputHandle, &mut dyn TempHandle) -> std::io::Result<()>,
@@ -801,7 +825,7 @@ fn stream_out(
     };
     let mut sink = FileSink(std::io::BufWriter::new(file));
     let result = if threshold > 0 {
-        match FileTemp::create() {
+        match FileTemp::create(input) {
             Ok(mut tmp) => write(&mut sink, &mut tmp),
             Err(e) => {
                 eprintln!("error: cannot create temp spill file: {}", e);
@@ -828,6 +852,58 @@ fn stream_out(
     );
 }
 
+/// The temp handle the hierarchical builder spills geometry into during the
+/// walk. With `threshold > 0` it is the on-disk `<input>_tmp_cache` (so peak
+/// RAM is one mesh, not the whole model); otherwise an in-RAM buffer (today's
+/// behaviour, byte-identical output).
+fn geom_temp(threshold: u64, input: &std::path::Path) -> Box<dyn TempHandle> {
+    if threshold > 0 {
+        match FileTemp::create(input) {
+            Ok(tmp) => Box::new(tmp),
+            Err(e) => {
+                eprintln!("error: cannot create temp spill file: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        Box::new(MemTemp::default())
+    }
+}
+
+/// Finish a hierarchical [`glb::GlbBuilder`] whose geometry already lives in
+/// `tmp`: stream the container (header + JSON + the binary chunk copied back
+/// from `tmp`) to `out_path`.
+fn finish_builder(
+    out_path: &std::path::Path,
+    builder: &glb::GlbBuilder,
+    generator: &str,
+    tmp: &mut dyn TempHandle,
+    t0: Instant,
+) {
+    let file = match std::fs::File::create(out_path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("error: cannot write {}: {}", out_path.display(), e);
+            std::process::exit(1);
+        }
+    };
+    let mut sink = FileSink(std::io::BufWriter::new(file));
+    if let Err(e) = builder.finish(generator, &mut sink, tmp).and_then(|()| {
+        use std::io::Write;
+        sink.0.flush()
+    }) {
+        eprintln!("error: writing {}: {}", out_path.display(), e);
+        std::process::exit(1);
+    }
+    let size = std::fs::metadata(out_path).map(|m| m.len()).unwrap_or(0);
+    eprintln!(
+        "wrote {} ({:.1} MB) in {:.2?} total",
+        out_path.display(),
+        size as f64 / 1e6,
+        t0.elapsed()
+    );
+}
+
 /// A file-backed [`OutputHandle`] (the final GLB).
 struct FileSink(std::io::BufWriter<std::fs::File>);
 
@@ -838,8 +914,8 @@ impl OutputHandle for FileSink {
     }
 }
 
-/// A file-backed [`TempHandle`] for the geometry spill: a scratch file in the
-/// system temp dir, positioned reads/writes, removed on drop.
+/// A file-backed [`TempHandle`] for the geometry / binary-chunk spill:
+/// positioned reads/writes, removed on drop.
 struct FileTemp {
     file: std::fs::File,
     path: PathBuf,
@@ -847,9 +923,20 @@ struct FileTemp {
 }
 
 impl FileTemp {
-    fn create() -> std::io::Result<FileTemp> {
-        let mut path = std::env::temp_dir();
-        path.push(format!("step2glb-spill-{}.bin", std::process::id()));
+    /// Create the spill **next to the input file**, named `<input>_tmp_cache`.
+    /// Deliberately not the system temp dir: `/tmp` is frequently tmpfs
+    /// (RAM-backed) on Linux, which would put the spill straight back in memory
+    /// and defeat `--memory-threshold`. The input's directory is real disk.
+    fn create(input: &std::path::Path) -> std::io::Result<FileTemp> {
+        let name = match input.file_name() {
+            Some(n) => {
+                let mut s = n.to_os_string();
+                s.push("_tmp_cache");
+                s
+            }
+            None => std::ffi::OsString::from("step2glb_tmp_cache"),
+        };
+        let path = input.with_file_name(name);
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)

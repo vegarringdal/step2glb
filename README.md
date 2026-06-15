@@ -234,8 +234,11 @@ step2glb model.step --no-optimize
 # output is byte-identical regardless of thread count
 step2glb model.step -t 8
 
-# spill the GLB binary chunk to a temp file instead of holding it in RAM
-# (accepts 300mb / 1gb / raw bytes; 0 = all in memory). Output is identical.
+# cap RAM by spilling to an on-disk temp file (accepts 300mb / 1gb / raw
+# bytes; 0 = all in memory). In the default hierarchical mode this spills each
+# mesh's geometry as it is tessellated, so peak RAM is one mesh, not the whole
+# model; with --merged only the output chunk spills (merged holds all geometry
+# in RAM). Spill is <input>_tmp_cache next to the input; output is identical.
 step2glb huge.step --memory-threshold 500mb
 
 # diagnose skipped faces: dump a minimal, shareable STEP reproduction of the
@@ -397,6 +400,13 @@ builds a compact index of `#id → (interned type id, parameter byte range)`
 after use — no DOM of the file is ever materialized. A 12.6 MB / 195 000
 entity file indexes in ~80 ms; a 15 MB assembly converts end-to-end in
 ~0.7 s with a ~90 MB peak RSS (geometry output dominates, not parsing).
+
+For models whose geometry won't fit, `--memory-threshold` spills the tessellated
+geometry to an on-disk temp file *as the hierarchical walk runs* (holding only
+one mesh plus accessor metadata), and streams the GLB back out of it — so peak
+RAM is bounded regardless of model size. Merged mode is the exception: it
+accumulates one buffer per color in RAM and does not stream (use the default
+hierarchical mode under a memory ceiling).
 
 ## Module map
 
@@ -692,18 +702,21 @@ cargo test
       no `COLOR_0` attribute yet.
 - [ ] Optional `EXT_mesh_gpu_instancing` instead of node-per-instance for
       huge assemblies, and meshopt simplification LODs (`--simplify`).
-- [ ] Better streaming for files that don't fit in RAM, on both sides:
-      - **input**: a chunked/streamed index instead of holding all file bytes
-        at once (the current design holds the bytes once — fine into the
-        multi-GB range, but not unbounded).
-      - **output**: a memory threshold (e.g. `--memory-threshold 300mb`) that,
-        when non-zero, spills tessellated geometry to a temp file/buffer and
-        keeps only `[offset, len]` range references in memory instead of
-        holding every mesh; `0` keeps today's all-in-memory behaviour, anything
-        above it tries to stay under that ceiling by streaming parts to disk.
-- [ ] WASM build with streaming to/from the browser's OPFS (Origin Private
-      File System) — depends on the streaming above landing first; the in-memory
-      tessellation buffers need to spill to OPFS to handle large models in-tab.
+- [x] ~~Output geometry spill (`--memory-threshold`)~~: in the hierarchical
+      walk each mesh's geometry is serialized to a temp handle the moment it is
+      tessellated, keeping only accessor/material metadata + the running offset
+      in RAM — so peak memory is one mesh, not the whole model. `0` keeps the
+      all-in-RAM path (byte-identical). Merged mode is the exception: it
+      accumulates one buffer per color and does not stream.
+- [x] ~~WASM build with streaming to/from the browser's OPFS~~: the worker
+      drives OPFS sync access handles as the core's `InputHandle` (read by
+      range) / `OutputHandle` / `TempHandle`, and the geometry spill above flows
+      through that temp handle — so a large model streams in-tab with bounded
+      wasm memory.
+- [ ] Remaining streaming gaps: an OPFS-backed `InputHandle` read **on demand
+      inside Rust** (today the wasm path reads the whole input into RAM once —
+      fine for tab-sized models, not unbounded), and bringing the geometry spill
+      to merged mode (per-color temp segments + a concatenation pass).
 - [x] ~~Parallel tessellation~~: `-t/--threads` fans faces out over scoped
       std threads (no new dependency), default auto = CPU cores capped at 4.
       Results merge in face order, so output is byte-identical to serial.
