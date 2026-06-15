@@ -325,6 +325,69 @@ pub enum SplitLevel {
     Face,
 }
 
+/// Geometry coverage: how many B-rep faces in the file are reachable from the
+/// product/representation graph, vs left unreferenced. Faces that are reached
+/// but can't be meshed are already tallied in [`TessStats`] (failed /
+/// unsupported); this catches the *other* failure mode — faces present in the
+/// file that no product points at, so they silently never reach tessellation
+/// (an unfollowed representation link, or orphan/loose geometry).
+pub struct Coverage {
+    /// distinct `ADVANCED_FACE` + `FACE_SURFACE` entities in the file
+    pub file_faces: usize,
+    /// distinct file faces reachable from some product's shape representation
+    pub reached_faces: usize,
+    /// file faces no product reaches, ascending — the silent-miss set
+    pub unreached: Vec<u32>,
+}
+
+/// Compute [`Coverage`] by walking each product's shape-representation items
+/// with [`split_units`] (the same traversal tessellation uses) and collecting
+/// the faces reached — no tessellation, so it is cheap. With no product
+/// structure the converter's fallback meshes all loose geometry, so every face
+/// counts as reached.
+pub fn geometry_coverage(sf: &StepFile, asm: &crate::hierarchy::Assembly) -> Coverage {
+    use std::collections::HashSet;
+    let mut all: HashSet<u32> = HashSet::new();
+    for ty in ["ADVANCED_FACE", "FACE_SURFACE"] {
+        all.extend(sf.of_type(ty).iter().copied());
+    }
+
+    let mut reached: HashSet<u32> = HashSet::new();
+    if asm.products.is_empty() || asm.roots.is_empty() {
+        // no product structure → the fallback meshes all loose geometry
+        reached = all.clone();
+    } else {
+        for node in asm.products.values() {
+            for &sr in &node.shape_reps {
+                if let Some(p) = sf.params(sr) {
+                    if let Some(list) = p.get(1).and_then(|v| v.as_list()) {
+                        for it in list {
+                            if let Some(r) = it.as_ref_id() {
+                                for f in split_units(sf, r, SplitLevel::Face) {
+                                    reached.insert(f);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let reached_faces = all.iter().filter(|f| reached.contains(f)).count();
+    let mut unreached: Vec<u32> = all
+        .iter()
+        .filter(|f| !reached.contains(f))
+        .copied()
+        .collect();
+    unreached.sort_unstable();
+    Coverage {
+        file_faces: all.len(),
+        reached_faces,
+        unreached,
+    }
+}
+
 /// Enumerate the geometry entities under top-level representation `item` at the
 /// given split granularity, each of which [`tessellate_item`] can mesh on its
 /// own. Returns entity ids whose `entity_type` + `#id` make a debuggable node

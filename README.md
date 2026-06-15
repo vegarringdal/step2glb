@@ -9,6 +9,9 @@
 Tessellate STEP (ISO 10303-21 / `.step` / `.stp`) files into binary glTF
 (`.glb`) and inspect the assembly hierarchy, with low memory usage.
 
+**▶ Live in-browser demo: <https://vegarringdal.github.io/step2glb/>** — converts
+STEP → GLB entirely client-side (wasm + OPFS), nothing uploaded to a server.
+
 No geometry kernel dependency (no OpenCASCADE): the parser, math, surfaces,
 tessellation, CSG and GLB writer are all hand-written. The engine lives in one
 library crate (`step2glb-core`) on top of three small dependencies — `md5`
@@ -145,6 +148,9 @@ if (rc == 0) { /* use glb[0..glb_len] */ step2glb_free(glb, glb_len); }
 ```
 
 ### WebAssembly — `step2glb-wasm` + `wasm-demo`
+
+Hosted demo: <https://vegarringdal.github.io/step2glb/> (deployed from `main`
+via [`.github/workflows/pages.yml`](.github/workflows/pages.yml)). Run locally:
 
 ```sh
 rustup target add wasm32-unknown-unknown

@@ -39,6 +39,15 @@
       #status {
         opacity: 0.8;
       }
+      header a {
+        color: #9cf;
+        text-decoration: none;
+        opacity: 0.85;
+        font-size: 13px;
+      }
+      header a:hover {
+        text-decoration: underline;
+      }
       main {
         display: flex;
         height: calc(100vh - 56px);
@@ -74,6 +83,12 @@
   <body>
     <header>
       <strong>step2glb</strong>
+      <a
+        href="https://github.com/vegarringdal/step2glb"
+        target="_blank"
+        rel="noopener"
+        >GitHub ↗</a
+      >
       <button id="sample">Sample (box − cylinder)</button>
       <label><input id="file" type="file" accept=".step,.stp,.STEP,.STP" /></label>
       <label title="chordal deflection (mm): coarser = fewer triangles = faster">

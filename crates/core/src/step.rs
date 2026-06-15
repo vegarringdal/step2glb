@@ -791,6 +791,14 @@ impl<'a> Window<'a> {
             let cut = (abs - self.base).min(self.buf.len());
             self.buf.drain(0..cut);
             self.base += cut;
+            // `drain` frees length but not capacity, so a single very large
+            // entity (a huge control-point list, a point cloud) would leave the
+            // buffer high-water-marked at that entity's size for the rest of the
+            // run. Once we've moved past it, hand the memory back so the window
+            // stays ~one entity + a chunk, not "the largest entity ever seen".
+            if self.buf.capacity() > 4 * WIN_CHUNK && self.buf.capacity() > self.buf.len() * 2 {
+                self.buf.shrink_to_fit();
+            }
         }
     }
 

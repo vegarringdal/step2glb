@@ -1671,3 +1671,42 @@ ENDSEC;";
         other => panic!("expected BSpline, got {:?}", other),
     }
 }
+
+// ===================================================== geometry coverage audit
+
+#[test]
+fn coverage_reaches_every_face_in_a_well_formed_assembly() {
+    // a clean AP203 assembly: every B-rep face must be reachable from a product,
+    // and (here) every reached face also tessellates — so reached == file == ok.
+    let sf = load("as1_pe_203.stp");
+    let asm = hierarchy::build(&sf);
+    let cov = tessellate::geometry_coverage(&sf, &asm);
+    assert!(cov.file_faces >= 53, "fixture carries B-rep faces");
+    assert!(
+        cov.unreached.is_empty(),
+        "every face should be reachable from a product; unreached: {:?}",
+        cov.unreached
+    );
+    assert_eq!(cov.reached_faces, cov.file_faces);
+}
+
+#[test]
+fn coverage_flags_faces_no_product_reaches() {
+    // sever every product's shape-representation link: now no product references
+    // any geometry, so every face is unreachable — the silent-miss case the
+    // audit exists to surface. (Reached-but-unmeshable faces are a different
+    // bucket, tracked in TessStats, not here.)
+    let sf = load("as1_pe_203.stp");
+    let mut asm = hierarchy::build(&sf);
+    for node in asm.products.values_mut() {
+        node.shape_reps.clear();
+    }
+    let cov = tessellate::geometry_coverage(&sf, &asm);
+    assert!(cov.file_faces > 0);
+    assert_eq!(cov.reached_faces, 0, "no product reaches anything now");
+    assert_eq!(
+        cov.unreached.len(),
+        cov.file_faces,
+        "all faces flagged as unreached"
+    );
+}

@@ -62,6 +62,13 @@ struct Args {
     #[arg(long)]
     stats: bool,
 
+    /// Audit geometry coverage: count the B-rep faces in the file and how many
+    /// are reachable from the product graph, listing any the walk never reaches
+    /// (geometry no product references — silently dropped). Reached-but-skipped
+    /// faces are reported separately (see the unsupported-type tables)
+    #[arg(long)]
+    coverage: bool,
+
     /// Merge everything into one node/mesh per color, geometry baked to
     /// world space (Y-up), with per-part draw ranges and the id hierarchy in
     /// scene extras — the rvm_parser_glb output layout. Holds all geometry in
@@ -485,6 +492,9 @@ fn main() {
             t1.elapsed()
         );
         report_unsupported(&stats);
+        if args.coverage {
+            report_coverage(&sf, &asm);
+        }
         maybe_write_debug(&args, &sf, &stats);
         eprintln!(
             "{} verts, {} tris",
@@ -762,6 +772,9 @@ fn main() {
         t1.elapsed()
     );
     report_unsupported(&stats);
+    if args.coverage {
+        report_coverage(&sf, &asm);
+    }
     maybe_write_debug(&args, &sf, &stats);
 
     let total_tris: usize = builder.total_triangles();
@@ -1204,6 +1217,40 @@ fn prepare_mesh(tm: &mut MeshSet, args: &Args) {
         );
     } else if let Some((threshold, target_error)) = simplify_only(args) {
         tm.simplify(threshold, target_error);
+    }
+}
+
+/// `--coverage`: how many B-rep faces in the file the product walk actually
+/// reaches. Faces no product references never reach tessellation and would
+/// otherwise vanish with no error — list a sample so they can be inspected.
+/// (Faces that *are* reached but fail to mesh show up in the unsupported-type
+/// tables from [`report_unsupported`].)
+fn report_coverage(sf: &StepFile, asm: &hierarchy::Assembly) {
+    let cov = tessellate::geometry_coverage(sf, asm);
+    if cov.file_faces == 0 {
+        eprintln!("coverage: no B-rep faces (ADVANCED_FACE/FACE_SURFACE) in file");
+        return;
+    }
+    let pct = 100.0 * cov.reached_faces as f64 / cov.file_faces as f64;
+    eprintln!(
+        "coverage: {}/{} faces reachable from products ({:.1}%)",
+        cov.reached_faces, cov.file_faces, pct
+    );
+    if !cov.unreached.is_empty() {
+        let sample = cov
+            .unreached
+            .iter()
+            .take(10)
+            .map(|id| format!("#{id}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        eprintln!(
+            "  warning: {} face(s) in the file are not referenced by any product \
+             (unfollowed representation linkage or orphan geometry — silently not meshed); e.g. {}",
+            cov.unreached.len(),
+            sample
+        );
+        eprintln!("  (inspect one with --filter \"#<id>\" --with-parent, or --tree)");
     }
 }
 

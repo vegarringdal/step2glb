@@ -12,8 +12,13 @@ import init, {
   convert_streaming,
   version,
 } from '../pkg/step2glb_wasm.js';
+// Import the .wasm as an explicit asset URL so Vite emits it and resolves it
+// under the configured `base` (e.g. /step2glb/ on GitHub Pages). This avoids
+// relying on the glue's `import.meta.url` rewrite inside the worker chunk — and
+// means the wasm never has to be inlined to deploy under a subpath.
+import wasmUrl from '../pkg/step2glb_wasm_bg.wasm?url';
 
-const ready = init().then(() => version());
+const ready = init(wasmUrl).then(() => version());
 const root = () => navigator.storage.getDirectory();
 
 async function openSync(path, create) {

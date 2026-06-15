@@ -85,6 +85,31 @@ npm run dev      # builds the wasm (wasm-pack) then starts Vite
 Open the printed URL, click **Convert sample**. `npm run build:wasm` alone
 regenerates `pkg/` (the wasm-bindgen glue + `.wasm`) after changing the Rust.
 
+## Deploy to GitHub Pages
+
+Pushing to `main` builds and publishes this demo via
+[`.github/workflows/pages.yml`](../.github/workflows/pages.yml). One-time setup:
+**repo Settings → Pages → Build and deployment → Source = "GitHub Actions"**.
+The site lands at `https://<owner>.github.io/<repo>/`.
+
+A project site is served from `/<repo>/`, not `/`, so the build needs a matching
+base path. The workflow derives it from the repo name
+(`VITE_BASE=/<repo>/ npm run build`); [`vite.config.js`](vite.config.js) reads
+`VITE_BASE` (default `/` for local dev / a user-or-org root site). To preview a
+Pages build locally:
+
+```sh
+cd wasm-demo
+npm run build:pages     # VITE_BASE=/step2glb/ vite build
+npm run preview:pages   # serve dist/ under the same base
+```
+
+The **`.wasm` does not need inlining** to work on Pages: GitHub Pages serves it
+as `application/wasm`, the worker imports it as an explicit `?url` asset (so Vite
+resolves it under `base`), and the wasm-bindgen glue falls back to `arrayBuffer`
+instantiation regardless. OPFS sync handles work because Pages is HTTPS and they
+need no COOP/COEP.
+
 ## Notes
 
 - OPFS sync access handles need a **Worker** and a **secure context**

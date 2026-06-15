@@ -8,7 +8,9 @@
     "build:wasm": "wasm-pack build ../crates/wasm --target web --out-dir ../../wasm-demo/pkg --release",
     "dev": "npm run build:wasm && vite",
     "build": "npm run build:wasm && vite build",
-    "preview": "vite preview"
+    "build:pages": "VITE_BASE=/step2glb/ npm run build",
+    "preview": "vite preview",
+    "preview:pages": "VITE_BASE=/step2glb/ vite preview --base /step2glb/"
   },
   "devDependencies": {
     "vite": "^5.4.0"
