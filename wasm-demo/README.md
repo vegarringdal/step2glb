@@ -44,6 +44,10 @@ Effective in the browser build today:
 - **cleanup** — rvm-style position weld (drops normals). The mesh *simplify*
   step needs meshoptimizer, which the wasm build omits, so in the browser this
   is weld + degenerate-drop only.
+- **render result** (on by default) — load the GLB into the viewer. Turn it
+  **off** to measure the converter's memory in isolation: model-viewer decodes
+  the glTF and uploads it to the GPU, which adds a chunk of memory *after* the
+  conversion. The GLB is still produced and **Export GLB** still works.
 - **memory** (slider, 100–2000 MB) — the ceiling that picks the path in
   hierarchical mode: a file **larger** than this streams through OPFS sync
   handles (input read by range, and each mesh's geometry spilled to OPFS as it
@@ -88,9 +92,15 @@ regenerates `pkg/` (the wasm-bindgen glue + `.wasm`) after changing the Rust.
   COOP/COEP headers (unlike `SharedArrayBuffer`).
 - The browser build drops the meshoptimizer pass (`step2glb-core` is built with
   `--no-default-features`), so meshes are valid but not weld-optimized.
-- This demo passes whole-file bytes to wasm. The deeper design — OPFS-backed
-  `InputHandle` / `TempHandle` read on demand *inside* Rust, for models larger
-  than tab memory — is the next streaming increment (see the repo `CLAUDE.md`).
+- The picked file is **streamed to OPFS** (`blob.stream().pipeTo(writable)`),
+  so it never sits whole in main-thread memory. The **streaming** path
+  (`convert_streaming`, file > ceiling) then reads it back from OPFS **by range
+  on demand inside Rust** — the offset index is built with a sliding window and
+  entity bytes are pulled per range, so the input is never fully materialized in
+  wasm memory either. The **in-RAM** path (`convert_step_to_glb`, file ≤ ceiling
+  or merged) does load the whole file into wasm memory — by design, for speed on
+  small files. The resident floor in the streaming path is the offset index
+  (∝ entity count) plus one entity + one mesh.
 
 ## Status
 
