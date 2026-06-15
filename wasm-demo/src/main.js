@@ -19,6 +19,7 @@ const yupEl = document.getElementById('yup');
 const normalsEl = document.getElementById('normals');
 const mergedEl = document.getElementById('merged');
 const cleanupEl = document.getElementById('cleanup');
+const renderEl = document.getElementById('render');
 const memEl = document.getElementById('mem');
 const memValEl = document.getElementById('memVal');
 const memLabel = document.getElementById('memLabel');
@@ -95,16 +96,19 @@ async function cleanup() {
   current = null;
 }
 
-async function writeUpload(bytes) {
+// Stream the picked file straight to OPFS in chunks — never materialise the
+// whole thing in main-thread memory. A File is backed by the OS file on disk,
+// so `blob.stream()` reads it lazily and `pipeTo` writes each chunk to OPFS
+// (and closes the writable on completion). Peak main-thread RAM is one chunk.
+async function writeUpload(blob) {
   const name = `${crypto.randomUUID()}.stp`;
   const fh = await (await opfsRoot()).getFileHandle(name, { create: true });
   const w = await fh.createWritable(); // async writable — fine on the main thread
-  await w.write(bytes);
-  await w.close();
+  await blob.stream().pipeTo(w);
   return name;
 }
 
-async function convert(displayName, bytes) {
+async function convert(displayName, blob) {
   if (busy) return;
   busy = true;
   downloadBtn.disabled = true;
@@ -113,7 +117,7 @@ async function convert(displayName, bytes) {
   viewer.src = ''; // clear the old model from the canvas before a new run
   statusEl.textContent = `staging ${displayName}…`;
   await cleanup();
-  const inputPath = await writeUpload(bytes);
+  const inputPath = await writeUpload(blob);
   const outputPath = `${crypto.randomUUID()}.glb`;
   current = { inputPath, outputPath, displayName };
   // merged mode accumulates one huge per-color buffer baked to world space — it
@@ -121,7 +125,7 @@ async function convert(displayName, bytes) {
   // Hierarchical mode spills each mesh's geometry to OPFS as it goes, so above
   // the ceiling it streams (bounded RAM); below it, all in RAM (faster).
   const merged = mergedEl.checked;
-  const streaming = !merged && bytes.length > Number(memEl.value) * 1024 * 1024;
+  const streaming = !merged && blob.size > Number(memEl.value) * 1024 * 1024;
   const opts = {
     deflectionMm: Number(deflEl.value),
     maxAngleDeg: Number(maxAngleEl.value),
@@ -156,12 +160,21 @@ async function convert(displayName, bytes) {
     return;
   }
 
-  // read the GLB the worker wrote to OPFS and render it
+  // the GLB the worker wrote to OPFS. getFile()/.size is just metadata — it
+  // does not load the bytes; only model-viewer (below) or Export does.
   const fh = await (await opfsRoot()).getFileHandle(m.outputPath);
-  const file = await fh.getFile();
-  current.glbUrl = URL.createObjectURL(file);
-  viewer.src = current.glbUrl;
-  renderInfo(m.displayName, file.size, m.ms, JSON.parse(m.info));
+  const size = (await fh.getFile()).size;
+  renderInfo(m.displayName, size, m.ms, JSON.parse(m.info));
+
+  // render only if asked — model-viewer decodes the glTF and uploads it to the
+  // GPU, which is a big chunk of memory *after* conversion. Skipping it leaves
+  // the canvas cleared and the post-conversion footprint to the converter.
+  if (renderEl.checked) {
+    current.glbUrl = URL.createObjectURL(await fh.getFile());
+    viewer.src = current.glbUrl;
+  } else {
+    statusEl.textContent += ' — render skipped (Export to save)';
+  }
 
   // the input is no longer needed
   await deleteFile(current.inputPath);
@@ -169,10 +182,16 @@ async function convert(displayName, bytes) {
 
   downloadBtn.disabled = false;
   downloadBtn.onclick = async () => {
+    // create the object URL on demand — when render is off none exists yet, so
+    // nothing of the GLB is held in memory until the user actually exports
+    const url =
+      current.glbUrl ??
+      URL.createObjectURL(await (await opfsRoot()).getFileHandle(current.outputPath).then((h) => h.getFile()));
     const a = document.createElement('a');
-    a.href = current.glbUrl;
+    a.href = url;
     a.download = `${current.displayName.replace(/\.[^.]*$/, '')}.glb`;
     a.click();
+    if (!current.glbUrl) URL.revokeObjectURL(url);
     // delete the OPFS output once the user has taken the file
     await deleteFile(current.outputPath);
     current.outputPath = null;
@@ -210,13 +229,15 @@ function renderInfo(name, glbSize, ms, r) {
 }
 
 sampleBtn.addEventListener('click', async () => {
+  // pass the Blob through — writeUpload streams it to OPFS without ever holding
+  // the whole file in main-thread memory
   const res = await fetch(sampleUrl);
-  await convert('sample', new Uint8Array(await res.arrayBuffer()));
+  await convert('sample', await res.blob());
 });
 
 fileInput.addEventListener('change', async () => {
   const f = fileInput.files?.[0];
-  if (f) await convert(f.name, new Uint8Array(await f.arrayBuffer()));
+  if (f) await convert(f.name, f); // the File is backed by disk; stream it
 });
 
 window.addEventListener('beforeunload', () => {

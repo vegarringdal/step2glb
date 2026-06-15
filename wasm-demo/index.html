@@ -98,6 +98,9 @@
       <label title="rvm-style position weld (drops normals; simplify needs meshopt, omitted in wasm)"
         ><input id="cleanup" type="checkbox" /> cleanup</label
       >
+      <label title="render the result in the viewer. Turn off to isolate the converter's memory — model-viewer decodes the glTF and uploads it to the GPU, which adds memory after the conversion. The GLB is still produced and exportable."
+        ><input id="render" type="checkbox" checked /> render result</label
+      >
       <label
         id="memLabel"
         title="memory ceiling: above this, the (hierarchical) converter spills geometry to OPFS so peak RAM stays bounded. Disabled in merged mode, which is always in-RAM."

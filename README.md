@@ -709,14 +709,17 @@ cargo test
       all-in-RAM path (byte-identical). Merged mode is the exception: it
       accumulates one buffer per color and does not stream.
 - [x] ~~WASM build with streaming to/from the browser's OPFS~~: the worker
-      drives OPFS sync access handles as the core's `InputHandle` (read by
-      range) / `OutputHandle` / `TempHandle`, and the geometry spill above flows
-      through that temp handle — so a large model streams in-tab with bounded
-      wasm memory.
-- [ ] Remaining streaming gaps: an OPFS-backed `InputHandle` read **on demand
-      inside Rust** (today the wasm path reads the whole input into RAM once —
-      fine for tab-sized models, not unbounded), and bringing the geometry spill
-      to merged mode (per-color temp segments + a concatenation pass).
+      drives OPFS sync access handles as the core's `InputHandle` / `OutputHandle`
+      / `TempHandle`. The input is read **by range on demand inside Rust** (the
+      offset index is built with a sliding window, entity bytes are pulled per
+      range — the whole file is never materialized), and the geometry spill above
+      flows through the temp handle — so a large model streams in-tab with
+      bounded wasm memory. The `convert_streaming` (hierarchical) path holds only
+      the offset index + one entity + one mesh; the `convert_step_to_glb` (in-RAM)
+      path, used for small files / merged, intentionally loads the whole file.
+- [ ] Remaining streaming gaps: the offset index itself is resident (∝ entity
+      count — the irreducible floor), and the geometry spill is not yet wired
+      into merged mode (per-color temp segments + a concatenation pass).
 - [x] ~~Parallel tessellation~~: `-t/--threads` fans faces out over scoped
       std threads (no new dependency), default auto = CPU cores capped at 4.
       Results merge in face order, so output is byte-identical to serial.
