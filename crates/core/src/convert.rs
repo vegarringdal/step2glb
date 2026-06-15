@@ -312,10 +312,6 @@ fn build_hierarchical(
             if let Some(&cached) = mesh_of_pd.get(&pd) {
                 return cached;
             }
-            // count progress in unique products (cache misses), so `done` stays
-            // within the product total
-            processed += 1;
-            progress(processed);
             let mut tm = MeshSet::default();
             let name = asm
                 .products
@@ -354,6 +350,10 @@ fn build_hierarchical(
                 }
             }
             prepare_mesh(&mut tm, opts);
+            // tick after the product is tessellated (not before), so progress
+            // never reads 100% while faces are still being worked
+            processed += 1;
+            progress(processed);
             let mi = if tm.is_empty() {
                 None
             } else {

@@ -1693,20 +1693,52 @@ pub fn install_panic_guard() {
 /// tess2 output in UV space: (vertices, triangle index triples).
 type Tess2Out = (Vec<[f64; 2]>, Vec<[u32; 3]>);
 
+/// Build tess2's flat (scaled) contour, dropping consecutive coincident points
+/// and the closing duplicate. Zero-length edges are the classic trigger for
+/// tess2's sweep-line robustness failures (it `unwrap()`s a freed region and
+/// panics) — and on wasm a panic aborts the whole module (no `catch_unwind`),
+/// so sanitizing the input here is the only way to keep a degenerate boundary
+/// from killing the conversion. Returns `None` for fewer than 3 distinct points.
+fn sanitize_contour(l: &[[f64; 2]], su: f64, sv: f64) -> Option<Vec<f64>> {
+    if l.len() < 3 {
+        return None;
+    }
+    let (mut w, mut h) = (0.0f64, 0.0f64);
+    for p in l {
+        w = w.max((p[0] * su).abs());
+        h = h.max((p[1] * sv).abs());
+    }
+    let eps = 1e-9 * w.max(h).max(1.0);
+    let mut flat: Vec<f64> = Vec::with_capacity(l.len() * 2);
+    for p in l {
+        let (x, y) = (p[0] * su, p[1] * sv);
+        if flat.len() >= 2 {
+            let (lx, ly) = (flat[flat.len() - 2], flat[flat.len() - 1]);
+            if (x - lx).abs() <= eps && (y - ly).abs() <= eps {
+                continue; // coincident with previous → zero-length edge
+            }
+        }
+        flat.push(x);
+        flat.push(y);
+    }
+    // drop a closing duplicate (first ≈ last)
+    if flat.len() >= 4 {
+        let n = flat.len();
+        if (flat[0] - flat[n - 2]).abs() <= eps && (flat[1] - flat[n - 1]).abs() <= eps {
+            flat.truncate(n - 2);
+        }
+    }
+    (flat.len() >= 6).then_some(flat) // ≥ 3 distinct points
+}
+
 fn run_tess2(loops_uv: &[Vec<[f64; 2]>], su: f64, sv: f64) -> Option<Tess2Out> {
     TESS_GUARD.with(|g| g.set(true));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut tess = Tessellator::new();
         for l in loops_uv {
-            if l.len() < 3 {
-                continue;
+            if let Some(flat) = sanitize_contour(l, su, sv) {
+                tess.add_contour(2, &flat);
             }
-            let mut flat: Vec<f64> = Vec::with_capacity(l.len() * 2);
-            for p in l {
-                flat.push(p[0] * su);
-                flat.push(p[1] * sv);
-            }
-            tess.add_contour(2, &flat);
         }
         if !tess.tessellate(WindingRule::Odd, ElementType::Polygons, 3, 2, None) {
             return None;
@@ -2571,6 +2603,23 @@ mod tests {
         assert!(point_in_poly([1.0, 1.0], &sq));
         assert!(!point_in_poly([3.0, 1.0], &sq));
         assert!(!point_in_poly([-1.0, 1.0], &sq));
+    }
+
+    #[test]
+    fn sanitize_contour_drops_zero_length_edges() {
+        // a square with a repeated vertex and a closing duplicate
+        let c = vec![
+            [0.0, 0.0],
+            [0.0, 0.0], // coincident with previous
+            [1.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 1.0],
+            [0.0, 0.0], // closing duplicate of the first
+        ];
+        let flat = sanitize_contour(&c, 1.0, 1.0).expect("4 distinct corners");
+        assert_eq!(flat.len(), 8, "4 distinct points × 2 coords");
+        // an all-coincident contour has no area → dropped
+        assert!(sanitize_contour(&[[5.0, 5.0], [5.0, 5.0], [5.0, 5.0]], 1.0, 1.0).is_none());
     }
 
     #[test]

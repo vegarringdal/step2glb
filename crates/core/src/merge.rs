@@ -197,10 +197,6 @@ impl Walk<'_, '_> {
         if let Some(cached) = self.cache.get(&pd) {
             return cached.clone();
         }
-        // a cache miss = one unique product actually tessellated (progress is
-        // counted in products, so it never exceeds the product total)
-        self.processed += 1;
-        (self.progress)(self.processed);
         let mut tm = MeshSet::default();
         if let Some(node) = self.asm.products.get(&pd) {
             for &sr in &node.shape_reps {
@@ -238,6 +234,11 @@ impl Walk<'_, '_> {
             }
         }
         prepare(&mut tm, &self.opts);
+        // tick after the product is actually tessellated (a cache miss = one
+        // unique product's worth of work just finished), so progress never
+        // shows 100% while a product's faces are still being tessellated
+        self.processed += 1;
+        (self.progress)(self.processed);
         let result = if tm.is_empty() { None } else { Some(tm) };
         self.cache.insert(pd, result.clone());
         result
