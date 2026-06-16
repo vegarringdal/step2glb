@@ -104,13 +104,13 @@
       <label title="rotate Z-up (STEP) to glTF Y-up"
         ><input id="yup" type="checkbox" checked /> Y-up</label
       >
-      <label title="keep per-vertex normals (larger; off = viewer flat-shades)"
+      <label title="keep per-vertex normals (larger; off = viewer flat-shades). Mutually exclusive with cleanup — cleanup welds positions and drops normals, so selecting one clears the other."
         ><input id="normals" type="checkbox" /> normals</label
       >
-      <label title="merged: one node/mesh per color baked to world (vs per-part node tree). Always in-RAM — it does not stream, so the memory ceiling does not apply."
+      <label title="merged: one node/mesh per color baked to world (vs per-part node tree). Always in-RAM — it can't stream, so the memory threshold does not apply (slider disabled while merged is on)."
         ><input id="merged" type="checkbox" /> merged</label
       >
-      <label title="rvm-style position weld (drops normals; simplify needs meshopt, omitted in wasm)"
+      <label title="rvm-style position weld (simplify needs meshopt, omitted in wasm). Welding drops normals, so this is mutually exclusive with normals — selecting one clears the other."
         ><input id="cleanup" type="checkbox" checked /> cleanup</label
       >
       <label title="render the result in the viewer. Turn off to isolate the converter's memory — model-viewer decodes the glTF and uploads it to the GPU, which adds memory after the conversion. The GLB is still produced and exportable."
@@ -138,6 +138,6 @@
       ></model-viewer>
       <aside id="info"></aside>
     </main>
-    <script type="module" src="./src/main.js"></script>
+    <script type="module" src="./src/main.ts"></script>
   </body>
 </html>
