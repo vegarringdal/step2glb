@@ -109,6 +109,66 @@ pub fn rep_unit_factor(sf: &StepFile, rep: u32, global_scale: f64) -> f64 {
     }
 }
 
+/// Radians per one of `unit`, if `unit` is a plane-angle unit. SI radian → 1.0;
+/// a `CONVERSION_BASED_UNIT('DEGREE'|'GRAD', …)` → the exact factor by name
+/// (mirrors how length handles INCH/FOOT). `None` if it isn't a plane-angle
+/// unit.
+fn plane_angle_unit_scale(sf: &StepFile, unit: u32) -> Option<f64> {
+    if sf.complex_leaf(unit, "PLANE_ANGLE_UNIT").is_none()
+        && sf.entity_type(unit) != Some("PLANE_ANGLE_UNIT")
+    {
+        return None;
+    }
+    if let Some(si) = sf.complex_leaf(unit, "SI_UNIT") {
+        if si.iter().any(|v| matches!(v, P::Enum(e) if e == "RADIAN")) {
+            return Some(1.0);
+        }
+    }
+    if let Some(cbu) = sf.complex_leaf(unit, "CONVERSION_BASED_UNIT") {
+        return match cbu
+            .iter()
+            .find_map(|v| v.as_str())?
+            .trim_matches('"')
+            .to_ascii_uppercase()
+            .as_str()
+        {
+            "DEGREE" | "DEGREES" => Some(std::f64::consts::PI / 180.0),
+            "GRAD" | "GRADIAN" | "GON" => Some(std::f64::consts::PI / 200.0),
+            _ => None,
+        };
+    }
+    None
+}
+
+/// Radians per the file's plane-angle unit (1.0 for SI radians, π/180 for a
+/// degree context). STEP angle measures — notably a `CONICAL_SURFACE`'s
+/// `semi_angle` — are in this unit, and some exporters declare degrees via a
+/// `CONVERSION_BASED_UNIT`. Reads the unit the global context actually
+/// **assigns** (not the radian base that the degree conversion references), so a
+/// degree file isn't mistaken for radians.
+pub fn file_plane_angle_scale(sf: &StepFile) -> f64 {
+    let cty = match sf.type_id(TYPE_COMPLEX) {
+        Some(t) => t,
+        None => return 1.0,
+    };
+    let Some(ids) = sf.by_type.get(&cty) else {
+        return 1.0;
+    };
+    for &id in ids {
+        if let Some(assigned) = sf.complex_leaf(id, "GLOBAL_UNIT_ASSIGNED_CONTEXT") {
+            if let Some(s) = assigned
+                .iter()
+                .filter_map(|v| v.as_list())
+                .flat_map(|l| l.iter().filter_map(|v| v.as_ref_id()))
+                .find_map(|u| plane_angle_unit_scale(sf, u))
+            {
+                return s;
+            }
+        }
+    }
+    1.0
+}
+
 pub fn cartesian_point(sf: &StepFile, id: u32) -> Option<V3> {
     // CARTESIAN_POINT('', (x, y, z))
     let p = sf.params(id)?;
@@ -176,10 +236,14 @@ pub fn surface(sf: &StepFile, id: u32) -> Option<Surface> {
     match ty {
         "PLANE" => Some(Surface::Plane(frame(1)?)),
         "CYLINDRICAL_SURFACE" => Some(Surface::Cylinder(frame(1)?, p.get(2)?.as_f64()?)),
+        // semi_angle is a plane-angle measure — convert from the file's angle
+        // unit to radians (degree-context files declare it via a
+        // CONVERSION_BASED_UNIT), else a 45° cone read as 45 rad becomes a near
+        // -flat disk.
         "CONICAL_SURFACE" => Some(Surface::Cone(
             frame(1)?,
             p.get(2)?.as_f64()?,
-            p.get(3)?.as_f64()?,
+            p.get(3)?.as_f64()? * file_plane_angle_scale(sf),
         )),
         "SPHERICAL_SURFACE" => Some(Surface::Sphere(frame(1)?, p.get(2)?.as_f64()?)),
         "TOROIDAL_SURFACE" | "DEGENERATE_TOROIDAL_SURFACE" => Some(Surface::Torus(

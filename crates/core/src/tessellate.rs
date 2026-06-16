@@ -1843,12 +1843,11 @@ fn run_tess2(loops_uv: &[Vec<[f64; 2]>], su: f64, sv: f64) -> Option<Tess2Out> {
 /// circle / meridian — plus axial or spanning edges), so it is not the iso-v
 /// band the band path assumes. Tessellate the region it bounds on the universal
 /// cover: keep the unwrapped loop as an open curve over ≈one u-period, then
-/// close it along a **singular cap** (a sphere pole / cone apex, sampled at the
-/// u step for a clean fan) — there the closing line collapses to a point, so the
-/// fan adds no spurious area. Cap-less surfaces (cylinder / torus) have no such
-/// edge to close against; closing against a cross-section circle would fill a
-/// spurious band/disk/spike, so those genuinely-winding faces are left skipped
-/// for a future seam-aware tessellation.
+/// close it along a **singular cap** — a sphere pole / cone apex, where the
+/// closing line collapses to a point so the fan adds no spurious area. Cap-less
+/// surfaces (cylinder / torus) have no such edge; closing against a
+/// cross-section circle / v-extreme is unreliable (needles, spikes, over-cover),
+/// so they are left skipped for a future seam-aware 2D-domain tessellation.
 fn tessellate_periodic_winding(
     surf: &Surface,
     loops_uv: &[LoopUv],
@@ -1867,14 +1866,18 @@ fn tessellate_periodic_winding(
     }
     let wl = winders[0];
 
+    // v-extent of the *winding* loop itself — this is what bounds the face and
+    // sets the closing extreme. (Using all loops would let a stray hole's
+    // v-range drag the closing edge far past the real face — a spike.) An
+    // iso-v winding rim has ~zero extent: it can't bound a finite region on its
+    // own (no opposite rim to pair, which the band path needs), so it falls out
+    // here and stays skipped rather than closing against an unrelated edge.
     let (mut vmin, mut vmax) = (f64::MAX, f64::MIN);
-    for l in loops_uv {
-        for p in &l.uv {
-            vmin = vmin.min(p[1]);
-            vmax = vmax.max(p[1]);
-        }
+    for p in &wl.uv {
+        vmin = vmin.min(p[1]);
+        vmax = vmax.max(p[1]);
     }
-    if !(vmax > vmin) {
+    if !(vmax - vmin > 1e-9 * (vmax.abs().max(vmin.abs())).max(1.0)) {
         return false;
     }
 
@@ -1888,10 +1891,12 @@ fn tessellate_periodic_winding(
     //   • one finite cap (cone apex): only the capped (tip) side is finite (the
     //     uncapped side runs to infinity and can't be a face), so close toward
     //     the apex regardless of the interior flag.
-    //   • no cap (cylinder / torus): neither side is a singular point, so
-    //     closing against a cross-section *circle* would fill a spurious
-    //     band/disk/spike. These genuinely-winding, cap-less faces need a proper
-    //     seam-aware tessellation — bail and leave them honestly skipped.
+    //   • no cap (cylinder / torus): neither side is a singular point. Closing
+    //     against the loop's own v-extreme works for a clean winding band, but
+    //     is unreliable in general — a v-outlier or an iso-v rim with a hole
+    //     turns it into a needle/spike, and there's no robust runtime way to
+    //     tell those apart. Wrong geometry in the output is worse than an honest
+    //     skip, so bail; these need a full seam-aware 2D-domain tessellation.
     let (cb, ct) = surf.v_caps().unwrap_or((f64::NEG_INFINITY, f64::INFINITY));
     let below = |c: f64| c + 1e-4 * (vmax - c).abs().max(1.0); // just inside a low cap
     let above = |c: f64| c - 1e-4 * (c - vmin).abs().max(1.0); // just inside a high cap

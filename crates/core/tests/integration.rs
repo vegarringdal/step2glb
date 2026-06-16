@@ -1776,3 +1776,44 @@ fn cone_winding_loop_closes_to_apex() {
         "cone-tip area {area} should be ~500 (π·R·slant to the apex)"
     );
 }
+
+// ====================================================== plane-angle unit (deg)
+
+#[test]
+fn cone_semi_angle_honours_a_degree_plane_angle_unit() {
+    // Some exporters declare plane angles in DEGREES via a CONVERSION_BASED_UNIT.
+    // A CONICAL_SURFACE's semi_angle is then in degrees; read as radians, a 45°
+    // cone (0.785 rad) becomes 45 rad — tan(45 rad) ≈ 1.6, a near-flat cone that
+    // tessellates as a giant disk. file_plane_angle_scale must convert it.
+    let step = concat!(
+        "ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\n",
+        "#1=(NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.));\n",
+        "#2=PLANE_ANGLE_MEASURE_WITH_UNIT(PLANE_ANGLE_MEASURE(0.0174533),#1);\n",
+        "#3=DIMENSIONAL_EXPONENTS(0.,0.,0.,0.,0.,0.,0.);\n",
+        "#4=(CONVERSION_BASED_UNIT('DEGREE',#2)NAMED_UNIT(#3)PLANE_ANGLE_UNIT());\n",
+        "#5=(NAMED_UNIT(*)LENGTH_UNIT()SI_UNIT(.MILLI.,.METRE.));\n",
+        "#6=(GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNIT_ASSIGNED_CONTEXT((#4,#5))REPRESENTATION_CONTEXT('',''));\n",
+        "#10=CARTESIAN_POINT('',(0.,0.,0.));\n",
+        "#11=DIRECTION('',(0.,0.,1.));\n",
+        "#12=DIRECTION('',(1.,0.,0.));\n",
+        "#13=AXIS2_PLACEMENT_3D('',#10,#11,#12);\n",
+        "#14=CONICAL_SURFACE('',#13,10.,45.);\n",
+        "ENDSEC;\nEND-ISO-10303-21;\n",
+    );
+    let sf = StepFile::parse(step.as_bytes().to_vec()).expect("parse");
+    assert!(
+        (step2glb::model::file_plane_angle_scale(&sf) - std::f64::consts::PI / 180.0).abs() < 1e-9,
+        "a DEGREE context is π/180 rad per unit, got {}",
+        step2glb::model::file_plane_angle_scale(&sf)
+    );
+    match step2glb::model::surface(&sf, 14).expect("cone surface") {
+        step2glb::geom::Surface::Cone(_, r, a) => {
+            assert!((r - 10.0).abs() < 1e-9, "radius unchanged");
+            assert!(
+                (a - std::f64::consts::FRAC_PI_4).abs() < 1e-6,
+                "45° must convert to π/4 rad, got {a}"
+            );
+        }
+        _ => panic!("expected a cone surface"),
+    }
+}
