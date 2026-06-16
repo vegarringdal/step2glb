@@ -495,7 +495,7 @@ fn assembly_hierarchy_and_instance_transform() {
 
 #[test]
 fn per_representation_length_unit_is_read_from_its_context() {
-    // Autodesk mixes units across contexts in one file: a mm context and a
+    // Some CAD systems mix units across contexts in one file: a mm context and a
     // metre context. Each SHAPE_REPRESENTATION must report its own unit, so a
     // metre-context part in an otherwise-mm file isn't scaled to nothing.
     let src = "DATA;
@@ -1872,5 +1872,25 @@ fn torus_winding_band_closes_to_v_extreme() {
     assert!(
         (40.0..90.0).contains(&area),
         "ring area {area} should be ~the torus band (~61)"
+    );
+}
+
+#[test]
+fn zero_area_slit_plane_is_degenerate_not_failed() {
+    // A planar face whose loop is two out-and-back slit "spokes" from one vertex
+    // (two coincident edges between the same pair, plus an edge used forward and
+    // reversed) encloses no area. It carries zero surface, so it must be
+    // classified degenerate and skipped quietly — not flagged a tessellation
+    // failure (which would wrongly imply a converter bug worth chasing).
+    let sf = load("degenerate_plane_slit.step");
+    let (set, stats) = tessellate_all(&sf, &["ADVANCED_FACE"]);
+    assert!(
+        set.merged().is_empty(),
+        "zero-area face produces no geometry"
+    );
+    assert_eq!(stats.faces_failed, 0, "degenerate, not a failure");
+    assert!(
+        stats.degenerate_faces >= 1,
+        "the slit face is counted degenerate"
     );
 }

@@ -1,16 +1,11 @@
 ISO-10303-21;
 HEADER;
 FILE_DESCRIPTION((''),'2;1');
-FILE_NAME('inscribed_hole','',(''),(''),'','','');
+FILE_NAME('','',(''),(''),'','','');
 FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
 ENDSEC;
 DATA;
-/* Synthetic regression fixture: a planar face whose circular outer rim
-   (radius 10) has a square hole inscribed in it -- the hole's 4 corners sit
-   exactly on the rim. Discretized, the rim's chords dip inside the true
-   circle while the corners stay on it, so the corners poke through the rim
-   and tess2 fails on the first pass; the holes must be nudged inward to
-   recover. True area = pi*100 - 200 ~= 114.16 (a hair more once shrunk). */
+
 #1=CARTESIAN_POINT('',(0.,0.,0.));
 #2=DIRECTION('',(0.,0.,1.));
 #3=DIRECTION('',(1.,0.,0.));

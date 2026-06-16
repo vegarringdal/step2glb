@@ -1,13 +1,7 @@
 ISO-10303-21;
-/* Extracted by step2glb --debug-print from a vendor model (AA040770.stp,
-   Autodesk Inventor 2024): a cylinder band whose two rims are CLOSED
-   B-spline edges (start vertex == end vertex) where the vertex sits half
-   way around the basis curve's own parametric seam. Snapping the curve's
-   natural endpoints onto the vertex folds the boundary polyline across the
-   cylinder, so the UV contour self-intersected and the face was dropped. */
 HEADER;
-FILE_DESCRIPTION(('cylinder band, closed b-spline rims with offset seam'),'2;1');
-FILE_NAME('cylinder_offset_seam_rims.step','2026-06-12T00:00:00',(''),(''),'','','');
+FILE_DESCRIPTION((''),'2;1');
+FILE_NAME('','',(''),(''),'','','');
 FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 3 1 1 }'));
 ENDSEC;
 DATA;

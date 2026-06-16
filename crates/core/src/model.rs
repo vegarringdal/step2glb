@@ -84,8 +84,8 @@ pub fn file_length_scale(sf: &StepFile) -> Option<f64> {
 }
 
 /// Length-unit scale (to metres) of a SHAPE_REPRESENTATION's own context, if it
-/// carries a `GLOBAL_UNIT_ASSIGNED_CONTEXT` with a length unit. Autodesk mixes
-/// mm and metre contexts in one file, so geometry must be scaled per
+/// carries a `GLOBAL_UNIT_ASSIGNED_CONTEXT` with a length unit. Some CAD
+/// systems mix mm and metre contexts in one file, so geometry must be scaled per
 /// representation rather than by a single global unit.
 pub fn representation_length_scale(sf: &StepFile, rep: u32) -> Option<f64> {
     // SHAPE_REPRESENTATION('name', (items), context)

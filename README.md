@@ -47,10 +47,24 @@ See [Crates](#crates) for the layout.
   closed with a sampled polar cap; boundary loops that pass *through* a
   pole/apex (half-cones with the tip on the rim, domes split through the
   poles) walk the cap line between the adjacent meridians at the
-  singularity, where `u` is otherwise undefined; a face bounded only by a
+  singularity, where `u` is otherwise undefined; a single boundary loop that
+  winds once around the seam but is *not* a clean iso-`v` circle is unwrapped
+  and closed along its far `v` edge — folded into the tip where the surface
+  has one (a cone apex or sphere pole adds no area, so a lune or half-cone
+  closes cleanly), or at the loop's own `v`-extreme for an open band
+  (cylinder / torus), guarded so a degenerate iso-`v` rim or a full-period
+  wrap is not mis-closed; a face bounded only by a
   seam "slit" (an edge walked out and back, enclosing no UV area — how some
   exporters write a full sphere as a single face) is recognized and
-  tessellated as the whole closed surface.
+  tessellated as the whole closed surface. Angle parameters (a cone's
+  half-angle, …) are read in the file's `PLANE_ANGLE` unit — radians by
+  default, or degrees / grads when the unit context assigns a
+  `CONVERSION_BASED_UNIT` — so a cone declared in degrees is not mistaken for
+  radians (which would flatten a 45° cone into a near-planar disk). A quadric
+  face whose boundary points do not actually lie on its declared surface (a
+  malformed export — a bounding circle off the axis, a vertex at the wrong
+  radius) is rejected as malformed rather than meshed into a spurious disk or
+  spike.
 - **Reads AP242 tessellated geometry** (`TRIANGULATED_FACE_SET`,
   `TESSELLATED_SOLID`, …) verbatim, and resolves `MAPPED_ITEM` instancing.
 - **Reads colors**: `STYLED_ITEM` / `OVER_RIDING_STYLED_ITEM` presentation
@@ -464,7 +478,7 @@ let asm = step2glb::hierarchy::build(&sf);
 cargo test
 ```
 
-- **Unit tests** (in each module, 56): Part-21 lexing/param parsing edge
+- **Unit tests** (in each module, 66): Part-21 lexing/param parsing edge
   cases (escaped quotes, comments, complex instances, typed params),
   entity-source reconstruction + reference-closure round-trip (the
   `--debug-print` machinery),
@@ -536,8 +550,27 @@ cargo test
     the degenerate pole is detected and the capped surface gridded over its full
     domain instead of being skipped by the periodic-band path.
   - `degenerate_sliver_face.step` — a planar face bounded by a single edge whose
-    start and end vertex coincide (vendor-model excerpt): a zero-area sliver,
+    start and end vertex coincide (real-model excerpt): a zero-area sliver,
     counted as a degenerate face and skipped quietly, not flagged as a failure.
+  - `degenerate_plane_slit.step` — a planar face whose many-edge boundary is an
+    out-and-back slit of spokes enclosing zero area (real-model excerpt):
+    detected by Newell area, counted degenerate rather than reported as a
+    trimming failure.
+  - `sphere_lune_through_poles.step` — a spherical lune whose single boundary
+    winds once through both poles (real-model excerpt): unwrapped and closed
+    along the meridian at each pole, area on the correct lune.
+  - `cone_winding_to_apex.step` — a conical face whose single winding loop is
+    closed toward the apex (real-model excerpt): the finite tip adds no area,
+    exact lateral area.
+  - `cylinder_winding_notch.step` — a cylindrical band whose single winding loop
+    is closed at its own `v`-extreme, no singular tip (real-model excerpt): all
+    points on the cylinder.
+  - `torus_winding_ring.step` — a toroidal band closed at its `v`-extreme, the
+    full-period-wrap guard preventing a mis-close (real-model excerpt): all
+    points on the torus.
+  - `malformed_offsurface_boundary.step` — a cylindrical face whose bounding
+    circle lies off the surface (a malformed real-model excerpt): rejected as
+    malformed instead of meshed into a giant spurious disk.
   - `csg_block_minus_cylinder.step` — a `CSG_SOLID` drilling a cylinder out of a
     block via `BOOLEAN_RESULT(.DIFFERENCE.)`: the BSP mesh boolean must remove the
     hole, checked by enclosed volume (block 1000 − cylinder ≈ 717) with every
@@ -554,7 +587,9 @@ cargo test
   - debugging/units: `--filter` name/id resolution and subtree dedup;
     `--extract-step`'s subtree closure reaches the brep and is deterministic;
     per-representation length units are read from each context (so a mixed
-    mm/metre file keeps each part's true size).
+    mm/metre file keeps each part's true size); a cone's `semi_angle` is scaled
+    by the file's `PLANE_ANGLE` unit, so a degree-context cone is read in
+    degrees, not radians.
 
 ## Known limitations / TODO
 
@@ -592,9 +627,11 @@ cargo test
       `LINE` cannot close on itself with any area) from boolean operations. These
       carry no surface, but were logged as "trimming/tessellation failed", framing
       a non-problem as a bug. A face whose boundary discretizes to fewer than
-      three distinct points is now counted as `degenerate_faces` and skipped with
-      a soft note — distinct from a boundary that produced *nothing* (an
-      unsupported curve), which still reports a real failure.
+      three distinct points — or that has three or more points but still
+      encloses (near-)zero area by Newell's formula, an out-and-back slit of
+      spokes — is now counted as `degenerate_faces` and skipped with a soft
+      note, distinct from a boundary that produced *nothing* (an unsupported
+      curve), which still reports a real failure.
 - [x] ~~Exploding / folded high-aspect wound B-spline strips~~: a structural
       part's wound body is a degree-3 NURBS with an extreme parameter aspect
       ratio (u≈1, v≈16000). It is the *whole* parametric patch, but its boundary

@@ -1,30 +1,9 @@
 ISO-10303-21;
-/* step2glb --filter --extract-step: a matched element plus the transitive
-   closure of everything it references — product structure, shape and
-   representation linkage (relationships followed multi-hop), geometry.
-   A standalone, re-runnable STEP file. */
 HEADER;
-/* 
- *  
- */
-
-FILE_DESCRIPTION(
-/* description */ ('General Arrangement Drawing'),
-/* implementation_level */ '2;1');
-
-FILE_NAME(
-/* name */ 
-'',
-/* time_stamp */ '2024-03-19T09:13:24+01:00',
-/* author */ ('.'),
-/* organization */ (''),
-/* preprocessor_version */ '- v18.1',
-/* originating_system */ '  ',
-/* authorisation */ '');
-
-FILE_SCHEMA (('AUTOMOTIVE_DESIGN { 1 0 10303 214 3 1 1 }'));
+FILE_DESCRIPTION((''),'2;1');
+FILE_NAME('','',(''),(''),'','','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 3 1 1 }'));
 ENDSEC;
-
 DATA;
 #31633=(BOUNDED_CURVE()
 B_SPLINE_CURVE(2,(#4921642,#4921643,#4921644),.UNSPECIFIED.,.F.,.F.)

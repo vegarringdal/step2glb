@@ -703,6 +703,15 @@ fn tessellate_face(
                 }
                 mesh.rollback(cp);
             }
+            // A boundary that encloses no area — out-and-back slit spokes, two
+            // coincident edges between the same vertices — is a degenerate face
+            // carrying zero surface, not a tessellation failure. (Checked after
+            // the planar re-fit, so a real face that merely *projected* to a
+            // slit on a wrong declared plane was already recovered above.)
+            if boundary_is_degenerate(sf, &bounds, tp) {
+                stats.degenerate_faces += 1;
+                return;
+            }
             stats.faces_failed += 1;
             record_failed(stats, sf, surf_id, face, reason);
         }
@@ -754,6 +763,10 @@ fn build_loops3d(
 fn boundary_is_degenerate(sf: &StepFile, bounds: &[crate::step::P], tp: &TessParams) -> bool {
     let mut sink = HashMap::new();
     let mut pts: Vec<V3> = Vec::new();
+    // sum of |signed area| over the loops, via Newell's formula centred on each
+    // loop's centroid (absolute coordinates far from the origin would swamp the
+    // cross products) — robust to non-planar loops.
+    let mut area = 0.0;
     for b in bounds {
         let bid = match b.as_ref_id() {
             Some(b) => b,
@@ -764,6 +777,17 @@ fn boundary_is_degenerate(sf: &StepFile, bounds: &[crate::step::P], tp: &TessPar
             .and_then(|bp| bp.get(1).and_then(|v| v.as_ref_id()));
         if let Some(lid) = loop_id {
             if let Some(lp) = loop_polyline(sf, lid, tp, &mut sink) {
+                if lp.len() >= 3 {
+                    let c = lp
+                        .iter()
+                        .fold(V3::ZERO, |s, p| s.add(*p))
+                        .scale(1.0 / lp.len() as f64);
+                    let mut n = V3::ZERO;
+                    for i in 0..lp.len() {
+                        n = n.add(lp[i].sub(c).cross(lp[(i + 1) % lp.len()].sub(c)));
+                    }
+                    area += n.len() * 0.5;
+                }
                 pts.extend_from_slice(&lp);
             }
         }
@@ -771,8 +795,19 @@ fn boundary_is_degenerate(sf: &StepFile, bounds: &[crate::step::P], tp: &TessPar
     if pts.is_empty() {
         return false; // nothing discretized — not "degenerate", just absent
     }
-    let scale = pts.iter().fold(1.0_f64, |m, p| m.max(p.len()));
-    let eps = 1e-7 * scale;
+    // bbox diagonal as the length scale for a scale-free area threshold
+    let (mut lo, mut hi) = (pts[0], pts[0]);
+    for p in &pts {
+        lo = v3(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+        hi = v3(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+    }
+    let diag = hi.sub(lo).len();
+    // a boundary that encloses ~no area — slit spokes, out-and-back edges — is a
+    // degenerate face carrying zero surface (a real face's area is O(diag²))
+    if diag > 0.0 && area < 1e-6 * diag * diag {
+        return true;
+    }
+    let eps = 1e-7 * pts.iter().fold(1.0_f64, |m, p| m.max(p.len()));
     let mut distinct: Vec<V3> = Vec::new();
     for p in &pts {
         if !distinct.iter().any(|q| q.sub(*p).len() < eps) {

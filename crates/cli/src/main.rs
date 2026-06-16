@@ -44,7 +44,7 @@ struct Args {
     /// Chordal deflection (max sag) for tessellation, in millimetres. It is
     /// converted into each representation's own modeling unit, so the same
     /// value means the same physical tolerance whether a part is in mm, inch or
-    /// metre (Autodesk mixes units across one file)
+    /// metre (some CAD systems mix units across one file)
     #[arg(short, long, default_value_t = 1.0)]
     deflection: f64,
 
@@ -556,7 +556,7 @@ fn main() {
         if let Some(node) = node {
             for &sr in &node.shape_reps {
                 // SHAPE_REPRESENTATION('', (items), context). Honour this
-                // representation's own length unit (Autodesk mixes mm and
+                // representation's own length unit (some CAD systems mix mm and
                 // metre contexts in one file): tessellate in the rep's unit
                 // (deflection scaled to match, so --deflection stays in mm),
                 // then scale the geometry into the global unit.

@@ -1,13 +1,11 @@
 ISO-10303-21;
 HEADER;
 FILE_DESCRIPTION((''),'2;1');
-FILE_NAME('null_curve_edge','',(''),(''),'','','');
+FILE_NAME('','',(''),(''),'','','');
 FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
 ENDSEC;
 DATA;
-/* Synthetic regression fixture: a planar triangle whose third edge has a
-   null ($) 3D curve. A null curve between two known vertices is a straight
-   segment; it must not drop the edge -> loop -> face to a skipped face. */
+
 #1=CARTESIAN_POINT('',(0.,0.,0.));
 #2=CARTESIAN_POINT('',(12.,0.,0.));
 #3=CARTESIAN_POINT('',(0.,8.,0.));

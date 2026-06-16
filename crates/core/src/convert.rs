@@ -327,8 +327,8 @@ fn build_hierarchical(
             .unwrap_or_else(|| format!("PD#{pd}"));
         if let Some(node) = asm.products.get(&pd) {
             for &sr in &node.shape_reps {
-                // honour each representation's own length unit (Autodesk mixes
-                // mm and metre contexts): tessellate in the rep's unit, scale in
+                // honour each representation's own length unit (some CAD systems
+                // mix mm and metre contexts): tessellate in the rep's unit, scale in
                 let factor = model::rep_unit_factor(cx.sf, sr, file_unit_scale);
                 let rep_tp = TessParams {
                     deflection: cx.tp.deflection / factor,

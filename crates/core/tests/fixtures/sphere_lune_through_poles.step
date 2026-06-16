@@ -1,16 +1,7 @@
 ISO-10303-21;
-/* step2glb --filter --extract-step: a matched element plus the transitive
-   closure of everything it references — product structure, shape and
-   representation linkage (relationships followed multi-hop), geometry.
-   A standalone, re-runnable STEP file. */
 HEADER;
-/****************************************************************
- * 
- * 
- * 
- ****************************************************************/
 FILE_DESCRIPTION((''),'2;1');
-FILE_NAME('','2025-10-01T15:47:17',(''),(''),'','','');
+FILE_NAME('','',(''),(''),'','','');
 FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));
 ENDSEC;
 DATA;

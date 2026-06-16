@@ -27,7 +27,7 @@ pub struct MergeOptions {
     /// scale factor to meters, baked into positions before the Y-up rotation
     pub unit_scale: f64,
     /// the file's global length-unit scale to metres (used to normalize a
-    /// representation that declares a different unit, e.g. an Autodesk part in
+    /// representation that declares a different unit, e.g. a part in
     /// a metre context inside an otherwise-mm file)
     pub file_unit_scale: f64,
     /// rotate the Z-up input to glTF's Y-up (`M4::Z_UP_TO_Y_UP`); off when

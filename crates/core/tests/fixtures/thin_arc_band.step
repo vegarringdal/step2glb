@@ -1,16 +1,11 @@
 ISO-10303-21;
 HEADER;
 FILE_DESCRIPTION((''),'2;1');
-FILE_NAME('thin_arc_band','',(''),(''),'','','');
+FILE_NAME('','',(''),(''),'','','');
 FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
 ENDSEC;
 DATA;
-/* Synthetic regression fixture: a planar face bounded by two near-concentric
-   arcs (radius 40 and 40.3) over a 60-degree sector -- a 0.3-wide crescent.
-   At a coarse deflection the arcs' chords sag deeper than the band is thin
-   and the boundary self-intersects, so tess2 fails on the first pass; the
-   tessellator must re-discretize finer and recover. Annular-sector area is
-   (pi/3)*(40.3^2-40^2)/2 ~= 12.6. */
+
 #1=CARTESIAN_POINT('',(0.,0.,0.));
 #2=DIRECTION('',(0.,0.,1.));
 #3=DIRECTION('',(1.,0.,0.));

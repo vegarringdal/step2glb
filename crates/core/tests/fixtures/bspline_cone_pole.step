@@ -1,14 +1,9 @@
 ISO-10303-21;
-/* step2glb --filter --extract-step: a matched element plus the transitive
-   closure of everything it references — product structure, shape and
-   representation linkage (relationships followed multi-hop), geometry.
-   A standalone, re-runnable STEP file. */
 HEADER;
-FILE_DESCRIPTION ((), '1');
-FILE_NAME ('', '');
-FILE_SCHEMA (('CONFIG_CONTROL_DESIGN'));
+FILE_DESCRIPTION((''),'2;1');
+FILE_NAME('','',(''),(''),'','','');
+FILE_SCHEMA(('CONFIG_CONTROL_DESIGN'));
 ENDSEC;
-
 DATA;
 #288154=CARTESIAN_POINT('', (3510917.25622044, 1773887.67515978, 105704.996562129));
 #288155=VERTEX_POINT('', #288154);

@@ -1,11 +1,11 @@
 ISO-10303-21;
 HEADER;
 FILE_DESCRIPTION((''),'2;1');
-FILE_NAME('two part assembly','',(''),(''),'','','');
+FILE_NAME('','',(''),(''),'','','');
 FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
 ENDSEC;
 DATA;
-/* part B geometry: triangle brep at origin */
+
 #1=CARTESIAN_POINT('',(0.,0.,0.));
 #2=CARTESIAN_POINT('',(10.,0.,0.));
 #3=CARTESIAN_POINT('',(0.,10.,0.));
@@ -27,10 +27,10 @@ DATA;
 #24=ADVANCED_FACE('',(#18),#23,.T.);
 #25=CLOSED_SHELL('',(#24));
 #26=MANIFOLD_SOLID_BREP('',#25);
-/* directions */
+
 #51=DIRECTION('',(0.,0.,1.));
 #52=DIRECTION('',(1.,0.,0.));
-/* products */
+
 #100=PRODUCT('ASM','ASM','',());
 #101=PRODUCT_DEFINITION_FORMATION('','',#100);
 #102=PRODUCT_DEFINITION('design','',#101,#300);
@@ -39,7 +39,7 @@ DATA;
 #112=PRODUCT_DEFINITION('design','',#111,#300);
 #300=PRODUCT_DEFINITION_CONTEXT('part definition',#301,'design');
 #301=APPLICATION_CONTEXT('automotive design');
-/* shapes */
+
 #120=PRODUCT_DEFINITION_SHAPE('','',#102);
 #121=PRODUCT_DEFINITION_SHAPE('','',#112);
 #130=AXIS2_PLACEMENT_3D('',#1,#51,#52);
@@ -48,7 +48,7 @@ DATA;
 #310=GEOMETRIC_REPRESENTATION_CONTEXT('3D','',3);
 #133=SHAPE_DEFINITION_REPRESENTATION(#120,#131);
 #134=SHAPE_DEFINITION_REPRESENTATION(#121,#132);
-/* assembly edge with a (100, 0, 0) translation */
+
 #140=NEXT_ASSEMBLY_USAGE_OCCURRENCE('1','b_instance','',#102,#112,$);
 #141=PRODUCT_DEFINITION_SHAPE('placement','',#140);
 #142=CARTESIAN_POINT('',(100.,0.,0.));

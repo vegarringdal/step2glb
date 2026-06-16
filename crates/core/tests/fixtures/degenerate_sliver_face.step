@@ -1,21 +1,9 @@
 ISO-10303-21;
-/* step2glb --filter --extract-step: a matched element plus the transitive
-   closure of everything it references — product structure, shape and
-   representation linkage (relationships followed multi-hop), geometry.
-   A standalone, re-runnable STEP file. */
 HEADER;
-FILE_DESCRIPTION (( '' ),
-    '1' );
-FILE_NAME ('',
-    '2021-09-07T08:05:25',
-    ( '' ),
-    ( '' ),
-    '',
-    ' ',
-    '' );
-FILE_SCHEMA (( 'CONFIG_CONTROL_DESIGN' ));
+FILE_DESCRIPTION((''),'2;1');
+FILE_NAME('','',(''),(''),'','','');
+FILE_SCHEMA(('CONFIG_CONTROL_DESIGN'));
 ENDSEC;
-
 DATA;
 #5553=FACE_BOUND('NONE', #998863, .T.);
 #24373=CARTESIAN_POINT('NONE',  ( -190.3085993701944300, 1499.683157356347200, 340.3259999999990000 ));

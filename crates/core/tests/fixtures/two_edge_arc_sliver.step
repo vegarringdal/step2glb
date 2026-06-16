@@ -1,12 +1,7 @@
 ISO-10303-21;
-/* Extracted by step2glb --debug-print from a vendor model (AA040770.stp,
-   Autodesk Inventor 2024): a sliver face bounded by exactly two edges, a
-   straight chord and a shallow (~12.7 deg) circular arc. At coarse
-   tessellation settings the arc collapses to a single chord, so the closed
-   loop degenerates to 2 points and the face used to be dropped. */
 HEADER;
-FILE_DESCRIPTION(('two-edge line+arc sliver face'),'2;1');
-FILE_NAME('two_edge_arc_sliver.step','2026-06-12T00:00:00',(''),(''),'','','');
+FILE_DESCRIPTION((''),'2;1');
+FILE_NAME('','',(''),(''),'','','');
 FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 3 1 1 }'));
 ENDSEC;
 DATA;
