@@ -822,6 +822,25 @@ impl Surface {
             Surface::Extrusion { .. } | Surface::Revolution { .. } | Surface::BSpline(_)
         )
     }
+
+    /// A quadric (cylinder / cone / sphere / torus): a closed, radius-based
+    /// surface whose closed-form UV inverse is exact, so `point_residual` is a
+    /// reliable distance-to-surface (used to reject boundary geometry that
+    /// doesn't lie on the surface).
+    pub fn is_quadric(&self) -> bool {
+        matches!(
+            self,
+            Surface::Cylinder(..) | Surface::Cone(..) | Surface::Sphere(..) | Surface::Torus(..)
+        )
+    }
+
+    /// 3D distance from `p` to this surface, via the closed-form UV inverse
+    /// (meaningful only when [`is_quadric`](Surface::is_quadric)). Zero for a
+    /// point on the surface; large for one that isn't.
+    pub fn point_residual(&self, p: V3) -> f64 {
+        let (u, v) = self.uv(p, None);
+        self.point(u, v).sub(p).len()
+    }
 }
 
 /// 2D Newton projection of p onto a B-spline surface. The `hint` (previous

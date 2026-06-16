@@ -964,6 +964,25 @@ fn face_to_mesh(
     same_sense: bool,
     mesh: &mut TriMesh,
 ) -> Result<(), &'static str> {
+    // Reject a face whose boundary doesn't lie on its (quadric) surface — a
+    // malformed export where an edge from an adjacent face on a *different*
+    // surface leaks into this loop (seen in the wild: a radius-3.5 cylinder
+    // face whose loop carries a circle centred ~1400 units away). On a quadric
+    // the UV inverse is exact, so a point far off the surface is unambiguous;
+    // projecting it would map the stray edge to a wild parameter and explode
+    // the face into a spike. Tolerance is the surface's own size — orders of
+    // magnitude above any real vertex/tolerance slop, so valid faces pass.
+    if surf.is_quadric() {
+        let tol = surf.approx_size().max(1.0);
+        if loops3d
+            .iter()
+            .flat_map(|l| l.pts.iter())
+            .any(|&p| surf.point_residual(p) > tol)
+        {
+            return Err("face boundary does not lie on its surface (malformed)");
+        }
+    }
+
     let per_u = surf.u_period();
     let per_v = surf.v_period();
 
@@ -1843,11 +1862,15 @@ fn run_tess2(loops_uv: &[Vec<[f64; 2]>], su: f64, sv: f64) -> Option<Tess2Out> {
 /// circle / meridian — plus axial or spanning edges), so it is not the iso-v
 /// band the band path assumes. Tessellate the region it bounds on the universal
 /// cover: keep the unwrapped loop as an open curve over ≈one u-period, then
-/// close it along a **singular cap** — a sphere pole / cone apex, where the
-/// closing line collapses to a point so the fan adds no spurious area. Cap-less
-/// surfaces (cylinder / torus) have no such edge; closing against a
-/// cross-section circle / v-extreme is unreliable (needles, spikes, over-cover),
-/// so they are left skipped for a future seam-aware 2D-domain tessellation.
+/// close it along a far v-edge and fill the strip between. The edge is a
+/// **singular cap** where the surface has one (a sphere pole / cone apex — the
+/// closing line collapses to a point, adding no area), else the **loop's own
+/// v-extreme** on a surface with bounded v (a cylinder, or a torus whose
+/// tube-angle stays within one period). Two degeneracies are filtered first: a
+/// boundary off the surface (malformed) by the quadric guard in
+/// [`face_to_mesh`], and an iso-v rim (zero v-extent, no opposite rim to bound
+/// against) by the zero-extent check below. A loop that also winds in v stays
+/// skipped for the doubly-periodic seam handling.
 fn tessellate_periodic_winding(
     surf: &Surface,
     loops_uv: &[LoopUv],
@@ -1891,12 +1914,15 @@ fn tessellate_periodic_winding(
     //   • one finite cap (cone apex): only the capped (tip) side is finite (the
     //     uncapped side runs to infinity and can't be a face), so close toward
     //     the apex regardless of the interior flag.
-    //   • no cap (cylinder / torus): neither side is a singular point. Closing
-    //     against the loop's own v-extreme works for a clean winding band, but
-    //     is unreliable in general — a v-outlier or an iso-v rim with a hole
-    //     turns it into a needle/spike, and there's no robust runtime way to
-    //     tell those apart. Wrong geometry in the output is worse than an honest
-    //     skip, so bail; these need a full seam-aware 2D-domain tessellation.
+    //   • no cap, open v (cylinder): v doesn't wrap, so the loop's own v-extent
+    //     bounds the face — close at the far extreme (the interior sense picks
+    //     which). The two failure modes are filtered upstream: a malformed
+    //     v-outlier by the on-surface guard, an iso-v rim by the zero-extent
+    //     check above.
+    //   • no cap, periodic v (torus): only when the tube-angle extent stays
+    //     within one period (no v-wind) — same as a cylinder then; if v also
+    //     winds there is no extreme to close against, so leave it for the
+    //     doubly-periodic seam handling.
     let (cb, ct) = surf.v_caps().unwrap_or((f64::NEG_INFINITY, f64::INFINITY));
     let below = |c: f64| c + 1e-4 * (vmax - c).abs().max(1.0); // just inside a low cap
     let above = |c: f64| c - 1e-4 * (c - vmin).abs().max(1.0); // just inside a high cap
@@ -1910,7 +1936,18 @@ fn tessellate_periodic_winding(
         }
         (true, false) => below(cb),
         (false, true) => above(ct),
-        (false, false) => return false,
+        (false, false) => {
+            if let Some(pv) = surf.v_period() {
+                if vmax - vmin >= pv - 1e-9 {
+                    return false; // winds in v too: doubly-periodic seam handling
+                }
+            }
+            if wl.interior_above {
+                vmax
+            } else {
+                vmin
+            }
+        }
     };
 
     // the unwrapped loop runs from uv[0] to ≈ uv[0] + w·per; close it back along

@@ -1817,3 +1817,60 @@ fn cone_semi_angle_honours_a_degree_plane_angle_unit() {
         _ => panic!("expected a cone surface"),
     }
 }
+
+#[test]
+fn face_with_off_surface_boundary_is_rejected() {
+    // A malformed export: a radius-3.5 CYLINDRICAL_SURFACE face whose loop
+    // carries an edge (a circle, r≈3.85) centred ~1400 units away — the
+    // boundary doesn't lie on the surface. Projecting it onto the cylinder maps
+    // the stray edge to a wild parameter (~1000× the radius) and explodes the
+    // face into a spike. The quadric on-surface guard must reject it (skip),
+    // not emit the spike.
+    let sf = load("malformed_offsurface_boundary.step");
+    let (set, stats) = tessellate_all(&sf, &["ADVANCED_FACE"]);
+    assert!(
+        set.merged().is_empty(),
+        "malformed face must produce no geometry"
+    );
+    assert_eq!(
+        stats.faces_ok, 0,
+        "the off-surface face must not tessellate"
+    );
+}
+
+#[test]
+fn cylinder_winding_band_closes_to_v_extreme() {
+    // A cylindrical face whose loop winds once around (a full-circle rim) plus
+    // axial lines and a partial arc — a near-full tube with a small notch. A
+    // cylinder has no cap, but v (axial) is open, so the loop's own v-extent
+    // bounds the face: the winding fallback closes the rim against its far
+    // v-extreme. Regression guard: it tessellates (not skips) to ~the tube's
+    // lateral area (R≈0.5, length≈16 → ~50, +notch; observed ~58), not a spike.
+    let sf = load("cylinder_winding_notch.step");
+    let (set, stats) = tessellate_all(&sf, &["ADVANCED_FACE"]);
+    assert_eq!(stats.faces_failed, 0, "the tube face must not be skipped");
+    assert!(stats.faces_ok >= 1, "the cylinder face tessellates");
+    let area = tri_area(&set.merged());
+    assert!(
+        (35.0..80.0).contains(&area),
+        "tube area {area} should be ~the cylinder's lateral area (~58)"
+    );
+}
+
+#[test]
+fn torus_winding_band_closes_to_v_extreme() {
+    // A toroidal face whose loop winds once around the major axis while the tube
+    // angle stays within one period (v doesn't wrap) — a thin ring/washer-edge
+    // band. v is periodic, but the bounded tube-angle extent means the loop's
+    // own v-extreme still bounds it (like a cylinder). Regression guard: it
+    // meshes to ~the ring's area (2π·R·minor-arc; observed ~61), not skipped.
+    let sf = load("torus_winding_ring.step");
+    let (set, stats) = tessellate_all(&sf, &["ADVANCED_FACE"]);
+    assert_eq!(stats.faces_failed, 0, "the ring face must not be skipped");
+    assert!(stats.faces_ok >= 1, "the torus face tessellates");
+    let area = tri_area(&set.merged());
+    assert!(
+        (40.0..90.0).contains(&area),
+        "ring area {area} should be ~the torus band (~61)"
+    );
+}
