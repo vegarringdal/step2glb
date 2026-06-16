@@ -16,7 +16,8 @@ No geometry kernel dependency (no OpenCASCADE): the parser, math, surfaces,
 tessellation, CSG and GLB writer are all hand-written. The engine lives in one
 library crate (`step2glb-core`) on top of three small dependencies — `md5`
 (mesh dedup keys), `tess2-rust` (pure-Rust libtess2 port for polygon
-triangulation with holes), and the optional `meshopt` (meshoptimizer pass) —
+triangulation with holes — [vendored as a fail-soft fork](#note-on-the-vendored-tess2-rust-fork)),
+and the optional `meshopt` (meshoptimizer pass) —
 with thin front-ends layered on top (a CLI, a C ABI, and a WebAssembly build).
 See [Crates](#crates) for the layout.
 
@@ -738,6 +739,40 @@ cargo test
       relationship hop away or on a sibling product-definition, so an
       indirectly-attached brep still appears. Runs also warn about leaf parts in
       the tree that carry no geometry — the usual sign of an unfollowed link.
+
+## Note on the vendored `tess2-rust` fork
+
+[`crates/tess2-rust`](crates/tess2-rust) is a vendored copy of
+[`tess2-rust`](https://crates.io/crates/tess2-rust) 1.1.4 (MIT), wired in via
+`[patch.crates-io]` in the workspace [`Cargo.toml`](Cargo.toml). The crate is
+workspace-`exclude`d (so `cargo fmt/test --all` leave upstream's formatting and
+tests untouched) and carries `#![allow(warnings)]`.
+
+**Why:** the wasm build is `panic=abort` with no unwinding (stable Rust can't
+build `panic=unwind` for wasm). Upstream tess2 *panics* on some degenerate
+contours — `region().unwrap()` on a freed/`None` region slot during the sweep.
+On native that panic is caught by `catch_unwind`, so the one bad face is skipped
+and conversion continues; on wasm there is no unwinding, so a single sliver face
+takes down the **whole module** — the entire conversion fails instead of
+dropping one face.
+
+**What we changed (only the failure path):** the `Tessellator` gains an
+`aborted: Cell<bool>` flag and a default `dummy_region`; the region accessors set
+`aborted` and hand back the dummy instead of `unwrap()`-ing a `None` slot, and
+the sweep loop bails to a clean `false` (= "tessellation failed" → face skipped,
+exactly the native behavior) on the next event. Core also sanitizes contours
+(`sanitize_contour` drops zero-length edges before tess2) to remove the most
+common trigger up front. The patched sites are marked `STEP2GLB PATCH:` in
+[`crates/tess2-rust/src/tess/mod.rs`](crates/tess2-rust/src/tess/mod.rs); the
+introducing commit is `fcc1231`.
+
+This is intentionally incremental — a different degenerate face could trip a
+*different* `unwrap()` deeper in the sweep; patch each new site the same way.
+
+**Upstream:** the fail-soft change is small and self-contained. If this POC
+keeps proving out, it's worth offering back to upstream `tess2-rust` as a PR —
+a `panic=abort`-safe degenerate-contour path benefits any wasm consumer, not
+just us.
 
 ## Note on the bundled `Cargo.lock`
 

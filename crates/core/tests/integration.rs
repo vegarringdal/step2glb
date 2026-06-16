@@ -1710,3 +1710,69 @@ fn coverage_flags_faces_no_product_reaches() {
         "all faces flagged as unreached"
     );
 }
+
+// ============================================ winding faces through polar caps
+
+/// Sum of triangle areas of a mesh (3D), for coverage/area sanity checks.
+fn tri_area(m: &TriMesh) -> f64 {
+    let p = |i: u32| {
+        let i = i as usize * 3;
+        v3(
+            m.positions[i] as f64,
+            m.positions[i + 1] as f64,
+            m.positions[i + 2] as f64,
+        )
+    };
+    m.indices
+        .chunks(3)
+        .filter(|t| t.len() == 3)
+        .map(|t| 0.5 * p(t[1]).sub(p(t[0])).cross(p(t[2]).sub(p(t[0]))).len())
+        .sum()
+}
+
+#[test]
+fn sphere_lune_winding_through_both_poles_tessellates() {
+    // A half-sphere "lune" bounded by a meridian great circle (which passes
+    // through BOTH poles, verified n·axis ≈ 0) plus two latitude arcs. The
+    // boundary genuinely winds once around the polar axis, so the band path —
+    // which models a winding curve as an iso-v latitude band — can't pair it;
+    // the winding fallback closes it against the polar cap (a singular point, so
+    // the fan adds no spurious area). Regression guard: it must tessellate to
+    // ~half the sphere (r=8 → full area 804), not be skipped or blow up.
+    let sf = load("sphere_lune_through_poles.step");
+    let (set, stats) = tessellate_all(&sf, &["ADVANCED_FACE"]);
+    assert_eq!(stats.faces_failed, 0, "the lune must not be skipped");
+    assert!(stats.faces_ok >= 1, "the lune face tessellates");
+    let m = set.merged();
+    assert!(!m.is_empty(), "non-empty mesh");
+    // half the sphere minus the small bulge bite ≈ 45% of 804 (observed ~360);
+    // a wide band guards the fix without pinning the exact tessellation.
+    let area = tri_area(&m);
+    assert!(
+        (300.0..430.0).contains(&area),
+        "lune area {area} should be ~half the sphere (402)"
+    );
+}
+
+#[test]
+fn cone_winding_loop_closes_to_apex() {
+    // A conical face bounded by a single loop that winds once around the axis
+    // (a near-full circle with a small notch). On a cone only the tip side —
+    // toward the apex — is finite, so the winding fallback must close the loop
+    // against the apex cap (a point), producing a cone tip; the band path can't
+    // pair a single winding curve with no second rim. Regression guard: it must
+    // tessellate (not skip) to a sane cone-tip area, not blow up or over-cover.
+    let sf = load("cone_winding_to_apex.step");
+    let (set, stats) = tessellate_all(&sf, &["ADVANCED_FACE"]);
+    assert_eq!(stats.faces_failed, 0, "the cone tip must not be skipped");
+    assert!(stats.faces_ok >= 1, "the cone face tessellates");
+    let m = set.merged();
+    assert!(!m.is_empty(), "non-empty mesh");
+    // R≈10.94 at the loop, slant to apex ≈ 15.5 → lateral area ≈ 530, minus the
+    // notch (observed ~486); a wide band guards the fix without over-pinning.
+    let area = tri_area(&m);
+    assert!(
+        (380.0..620.0).contains(&area),
+        "cone-tip area {area} should be ~500 (π·R·slant to the apex)"
+    );
+}

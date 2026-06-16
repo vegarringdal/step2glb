@@ -111,7 +111,7 @@
         ><input id="merged" type="checkbox" /> merged</label
       >
       <label title="rvm-style position weld (drops normals; simplify needs meshopt, omitted in wasm)"
-        ><input id="cleanup" type="checkbox" /> cleanup</label
+        ><input id="cleanup" type="checkbox" checked /> cleanup</label
       >
       <label title="render the result in the viewer. Turn off to isolate the converter's memory — model-viewer decodes the glTF and uploads it to the GPU, which adds memory after the conversion. The GLB is still produced and exportable."
         ><input id="render" type="checkbox" checked /> render result</label
@@ -121,8 +121,8 @@
         title="memory ceiling: above this, the (hierarchical) converter spills geometry to OPFS so peak RAM stays bounded. Disabled in merged mode, which is always in-RAM."
       >
         memory
-        <input id="mem" type="range" min="100" max="2000" step="100" value="512" />
-        <span id="memVal">512</span> MB
+        <input id="mem" type="range" min="100" max="2000" step="100" value="100" />
+        <span id="memVal">100</span> MB
       </label>
       <button id="download" disabled>Export GLB</button>
       <span id="status">loading wasm…</span>

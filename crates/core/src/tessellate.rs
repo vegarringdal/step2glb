@@ -1140,8 +1140,20 @@ fn face_to_mesh(
     }
 
     if loops_uv.iter().any(|l| l.w != 0) {
+        // The band path models a winding curve as an iso-v latitude line (paired
+        // with another or a polar cap). A single winding loop that also spans a
+        // v-range — it carries the winding edge (a full circle / meridian) plus
+        // axial/spanning edges — isn't that shape, so fall back to closing it
+        // against the surface's v-extent on the interior side (see
+        // tessellate_periodic_winding). Roll the mesh back first so a partial
+        // band emit doesn't leak.
+        let cp = mesh.checkpoint();
+        if tessellate_periodic_band(surf, &loops_uv, tp, same_sense, mesh) {
+            return Ok(());
+        }
+        mesh.rollback(cp);
         return ok_or(
-            tessellate_periodic_band(surf, &loops_uv, tp, same_sense, mesh),
+            tessellate_periodic_winding(surf, &loops_uv, tp, same_sense, mesh),
             "periodic-band (wrap-around) tessellation failed \
              (multi-winding loop or seam reconstruction)",
         );
@@ -1824,6 +1836,92 @@ fn run_tess2(loops_uv: &[Vec<[f64; 2]>], su: f64, sv: f64) -> Option<Tess2Out> {
     }));
     TESS_GUARD.with(|g| g.set(false));
     result.ok().flatten()
+}
+
+/// Fallback for a single winding loop the band path can't pair: the loop winds
+/// once in `u` but also spans a `v`-range (it carries the winding edge — a full
+/// circle / meridian — plus axial or spanning edges), so it is not the iso-v
+/// band the band path assumes. Tessellate the region it bounds on the universal
+/// cover: keep the unwrapped loop as an open curve over ≈one u-period, then
+/// close it along a **singular cap** (a sphere pole / cone apex, sampled at the
+/// u step for a clean fan) — there the closing line collapses to a point, so the
+/// fan adds no spurious area. Cap-less surfaces (cylinder / torus) have no such
+/// edge to close against; closing against a cross-section circle would fill a
+/// spurious band/disk/spike, so those genuinely-winding faces are left skipped
+/// for a future seam-aware tessellation.
+fn tessellate_periodic_winding(
+    surf: &Surface,
+    loops_uv: &[LoopUv],
+    tp: &TessParams,
+    same_sense: bool,
+    mesh: &mut TriMesh,
+) -> bool {
+    if surf.u_period().is_none() {
+        return false;
+    }
+    // exactly one winding loop (the band path owns the pairable multi-curve
+    // cases); the rest are real holes.
+    let winders: Vec<&LoopUv> = loops_uv.iter().filter(|l| l.w != 0).collect();
+    if winders.len() != 1 || winders[0].w.abs() != 1 || winders[0].uv.len() < 3 {
+        return false;
+    }
+    let wl = winders[0];
+
+    let (mut vmin, mut vmax) = (f64::MAX, f64::MIN);
+    for l in loops_uv {
+        for p in &l.uv {
+            vmin = vmin.min(p[1]);
+            vmax = vmax.max(p[1]);
+        }
+    }
+    if !(vmax > vmin) {
+        return false;
+    }
+
+    // Close the winding curve against a far v-edge and fill the strip between —
+    // but only when that edge is a real **singular cap** (a sphere pole / cone
+    // apex), where the closing line collapses to a point and the fan adds no
+    // spurious area. The choice of cap is forced by the surface, not the
+    // interior flag:
+    //   • two finite caps (sphere): both sides are finite lunes — here the
+    //     interior sense does pick which pole to close toward.
+    //   • one finite cap (cone apex): only the capped (tip) side is finite (the
+    //     uncapped side runs to infinity and can't be a face), so close toward
+    //     the apex regardless of the interior flag.
+    //   • no cap (cylinder / torus): neither side is a singular point, so
+    //     closing against a cross-section *circle* would fill a spurious
+    //     band/disk/spike. These genuinely-winding, cap-less faces need a proper
+    //     seam-aware tessellation — bail and leave them honestly skipped.
+    let (cb, ct) = surf.v_caps().unwrap_or((f64::NEG_INFINITY, f64::INFINITY));
+    let below = |c: f64| c + 1e-4 * (vmax - c).abs().max(1.0); // just inside a low cap
+    let above = |c: f64| c - 1e-4 * (c - vmin).abs().max(1.0); // just inside a high cap
+    let vfar = match (cb.is_finite(), ct.is_finite()) {
+        (true, true) => {
+            if wl.interior_above {
+                above(ct)
+            } else {
+                below(cb)
+            }
+        }
+        (true, false) => below(cb),
+        (false, true) => above(ct),
+        (false, false) => return false,
+    };
+
+    // the unwrapped loop runs from uv[0] to ≈ uv[0] + w·per; close it back along
+    // v = vfar (sampled at the u step so a polar cap fans cleanly).
+    let u0 = wl.uv[0][0];
+    let uend = wl.uv[wl.uv.len() - 1][0];
+    let mut poly = wl.uv.clone();
+    let du = surf.u_step(tp.deflection, tp.max_angle);
+    let n = (((uend - u0).abs() / du).ceil() as usize).clamp(2, 256);
+    for k in 0..=n {
+        poly.push([uend + (u0 - uend) * k as f64 / n as f64, vfar]);
+    }
+
+    let mut all = vec![poly];
+    all.extend(loops_uv.iter().filter(|l| l.w == 0).map(|l| l.uv.clone()));
+    emit_uv_region(surf, &all, tp, same_sense, mesh)
 }
 
 /// Faces that wrap fully around a periodic surface. Each winding loop is cut
