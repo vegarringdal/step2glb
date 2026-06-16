@@ -506,17 +506,32 @@ impl Surface {
                 let d = p.sub(f.o);
                 (d.dot(f.x), d.dot(f.y))
             }
-            Surface::Cylinder(f, _) | Surface::Cone(f, _, _) => {
+            Surface::Cylinder(f, _) => {
                 let d = p.sub(f.o);
                 let (px, py) = (d.dot(f.x), d.dot(f.y));
-                // at the cone apex u is undefined (atan2(0,0)): stay on the
-                // previous boundary point's meridian instead of jumping to 0
+                (py.atan2(px), d.dot(f.z))
+            }
+            Surface::Cone(f, r, a) => {
+                let d = p.sub(f.o);
+                let (px, py) = (d.dot(f.x), d.dot(f.y));
+                let v = d.dot(f.z);
+                // at the apex u is undefined (atan2(0,0)): stay on the previous
+                // boundary point's meridian instead of jumping to 0
                 let u = if (px * px + py * py).sqrt() < 1e-9 * d.len().max(1.0) {
                     hint.map_or(0.0, |h| h.0)
                 } else {
-                    py.atan2(px)
+                    // beyond the apex the signed radius r + v·tan(a) flips sign,
+                    // so the point lies on the far nappe at angle u+π (ISO
+                    // 10303-42 conical_surface spans all v); offset so that
+                    // point(u, v) inverts back to p instead of the mirror side.
+                    let u = py.atan2(px);
+                    if r + v * a.tan() < 0.0 {
+                        u + std::f64::consts::PI
+                    } else {
+                        u
+                    }
                 };
-                (u, d.dot(f.z))
+                (u, v)
             }
             Surface::Sphere(f, r) => {
                 let d = p.sub(f.o);
@@ -1119,6 +1134,31 @@ mod tests {
                 assert!(close(p, s.point(u2, v2), 1e-9), "{:?} roundtrip failed", s);
             }
         }
+    }
+
+    #[test]
+    fn cone_uv_roundtrip_across_the_apex() {
+        // A CONICAL_SURFACE spans all v (ISO 10303-42): past the apex the
+        // signed radius r + v·tan(a) goes negative — the far nappe, at angle
+        // u+π. uv() must invert points on *both* nappes, or a valid frustum
+        // beyond the apex is mis-mapped (and then wrongly rejected as
+        // off-surface by the on-surface guard). Regression for that bug.
+        let f = Frame::new(v3(1.0, -2.0, 0.5), Some(v3(0.0, 1.0, 1.0)), None);
+        let cone = Surface::Cone(f, 3.0, std::f64::consts::FRAC_PI_4); // apex at v=-3
+        for &v in &[2.0_f64, 0.5, -1.0, -5.0, -8.0] {
+            let rv = 3.0 + v; // tan(45°) = 1
+            for &u in &[0.0_f64, 1.3, -2.4, 3.0] {
+                let p = cone.point(u, v);
+                let (u2, v2) = cone.uv(p, None);
+                assert!(
+                    close(p, cone.point(u2, v2), 1e-9),
+                    "cone roundtrip failed at (u={u}, v={v}), signed radius {rv}"
+                );
+            }
+        }
+        // and the on-surface residual is ~0 on the far nappe (guard must pass)
+        let far = cone.point(1.0, -8.0);
+        assert!(cone.point_residual(far) < 1e-9);
     }
 
     #[test]

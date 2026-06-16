@@ -1240,6 +1240,32 @@ fn half_cone_with_apex_on_boundary() {
 }
 
 #[test]
+fn cone_frustum_beyond_the_apex_tessellates() {
+    // a conical frustum band whose rims sit PAST the apex (signed radius
+    // r + v·tan(a) negative, the far nappe): a valid CONICAL_SURFACE face the
+    // cone uv inverse must map correctly — not reject as "boundary off surface"
+    let sf = load("cone_frustum_past_apex.step");
+    let (set, stats) = tessellate_all(&sf, &["SHELL_BASED_SURFACE_MODEL"]);
+    assert_eq!((stats.faces_ok, stats.faces_failed), (1, 0));
+    let mesh = set.merged();
+    // frustum lateral area = pi*(r1+r2)*slant, r1=3.2 r2=4.0, slant=0.8*sqrt(2)
+    let expect = std::f64::consts::PI * (3.2 + 4.0) * 0.8 * (2.0_f64).sqrt();
+    let area = total_area(&mesh);
+    assert!(
+        (area - expect).abs() / expect < 0.02,
+        "area {area} vs {expect}"
+    );
+    // every vertex on the cone: radial distance from the axis (line y=15.3,
+    // z=278 along X) equals |3.6 + v|, with v = -(x + 35.2)
+    for c in mesh.positions.chunks(3) {
+        let (x, y, z) = (c[0] as f64, c[1] as f64, c[2] as f64);
+        let radial = ((y - 15.3).powi(2) + (z - 278.0).powi(2)).sqrt();
+        let v = -(x + 35.2);
+        assert!((radial - (3.6 + v).abs()).abs() < 1e-3, "off cone: {c:?}");
+    }
+}
+
+#[test]
 fn hemisphere_bounded_through_both_poles() {
     // half sphere whose boundary great circle passes through both poles
     // (dome split in two): both pole singularities sit on the boundary
