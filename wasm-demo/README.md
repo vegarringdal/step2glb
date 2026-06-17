@@ -78,6 +78,19 @@ The bundled sample (`src/sample-box-cylinder.stp`) is a `CSG_SOLID`: a 10×10×1
 block with a Ø6 cylinder drilled through it (exercises the BSP mesh boolean).
 You can also pick any `.step`/`.stp` file with the file input.
 
+### Layout
+
+A small header (hamburger ⟶ **Step2Glb** ⟶ GitHub link on the left; status and a
+**Report** toggle on the right) sits over a three-pane body: a collapsible
+**left settings panel** (the controls below, each with an inline hint), the
+**viewer** in the middle, and a collapsible **right report panel**. A **footer
+action bar** holds the two primary buttons — **Load sample** (left) and **Export
+GLB** (right) — kept out of the scrolling settings list and always reachable.
+The hamburger toggles the settings panel and the **Report** button toggles the
+report; on narrow / mobile screens both become overlay drawers (between header
+and footer, dismissable by tapping the backdrop) so the viewer keeps the full
+width.
+
 ### Controls
 
 Effective in the browser build today:
@@ -136,7 +149,7 @@ npm install
 npm run dev      # builds the wasm (wasm-pack) then starts Vite
 ```
 
-Open the printed URL, click **Sample (box − cylinder)**. `npm run build:wasm`
+Open the printed URL, click **Load sample (box − cylinder)** in the settings panel. `npm run build:wasm`
 alone regenerates `pkg/` (the wasm-bindgen glue + `.wasm`) after changing the
 Rust. Vite transpiles the TypeScript with esbuild (no type-checking on the hot
 path); run `npm run typecheck` (`tsc --noEmit`) to type-check — it reads the

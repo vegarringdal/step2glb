@@ -30,6 +30,29 @@ const renderEl = byId<HTMLInputElement>('render');
 const memEl = byId<HTMLInputElement>('mem');
 const memValEl = byId('memVal');
 const memLabel = byId('memLabel');
+const emptyEl = byId('empty');
+
+// ---------- collapsible panels (left = settings, right = report) ----------
+const setPanel = (name: 'config' | 'info', open: boolean): void => {
+  document.body.classList.toggle(`${name}-open`, open);
+};
+const togglePanel = (name: 'config' | 'info'): void => {
+  document.body.classList.toggle(`${name}-open`);
+};
+
+byId('menuToggle').addEventListener('click', () => togglePanel('config'));
+byId('infoToggle').addEventListener('click', () => togglePanel('info'));
+byId('configClose').addEventListener('click', () => setPanel('config', false));
+byId('infoClose').addEventListener('click', () => setPanel('info', false));
+byId('backdrop').addEventListener('click', () => {
+  setPanel('config', false);
+  setPanel('info', false);
+});
+
+// the settings panel's initial open/closed state is set before paint by the
+// inline script in index.html (open on wide screens, closed on narrow drawers).
+// `isNarrow` here only gates the post-conversion auto-open of the report below.
+const isNarrow = window.matchMedia('(max-width: 820px)');
 
 // live-update the slider read-outs
 deflEl.addEventListener('input', () => {
@@ -75,6 +98,7 @@ async function convert(displayName: string, blob: Blob): Promise<void> {
   downloadBtn.disabled = true;
   sampleBtn.disabled = true;
   infoEl.textContent = '';
+  emptyEl.style.display = 'none';
   viewer.removeAttribute('src'); // clear the old model before a new run
   current = null;
 
@@ -101,6 +125,9 @@ async function convert(displayName: string, blob: Blob): Promise<void> {
     current = result;
     renderInfo(result.displayName, await result.size(), result.ms, result.report);
     statusEl.textContent = `done in ${result.ms} ms (${result.streaming ? 'streamed via OPFS' : 'in memory'})`;
+    // surface the report automatically on wide screens (on narrow drawers it
+    // would cover the freshly-rendered result, so leave it to the user there)
+    if (!isNarrow.matches) setPanel('info', true);
 
     // render only if asked — model-viewer decodes the glTF and uploads it to the
     // GPU, a big chunk of memory *after* conversion. Skipping it leaves the
